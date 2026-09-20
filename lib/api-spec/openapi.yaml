@@ -3,13 +3,23 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: UPI Saathi guidance and simulated payment API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: dashboard
+    description: Dashboard overview
+  - name: voice
+    description: Voice and intent guidance
+  - name: payments
+    description: Safety checks and simulated payments
+  - name: learning
+    description: Tutorials and fraud education
+  - name: settings
+    description: Accessibility and language settings
 paths:
   /healthz:
     get:
@@ -24,6 +34,369 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /dashboard:
+    get:
+      operationId: getDashboard
+      tags: [dashboard]
+      summary: Get dashboard overview
+      responses:
+        "200":
+          description: Dashboard overview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dashboard"
+  /voice/transcribe:
+    post:
+      operationId: transcribeVoice
+      tags: [voice]
+      summary: Convert a demo voice phrase into transcript and intent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VoiceInput"
+      responses:
+        "200":
+          description: Parsed voice request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentResult"
+  /intent/detect:
+    post:
+      operationId: detectIntent
+      tags: [voice]
+      summary: Detect intent and extract payment entities
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IntentInput"
+      responses:
+        "200":
+          description: Detected intent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentResult"
+  /payment/guide:
+    post:
+      operationId: guidePayment
+      tags: [payments]
+      summary: Run safety guidance for a simulated payment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentInput"
+      responses:
+        "200":
+          description: Safety guidance result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SafetyResult"
+  /payment/confirm:
+    post:
+      operationId: confirmPayment
+      tags: [payments]
+      summary: Confirm a simulated demo transaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentInput"
+      responses:
+        "201":
+          description: Simulated transaction created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+  /history:
+    get:
+      operationId: getHistory
+      tags: [payments]
+      summary: List simulated payment history
+      responses:
+        "200":
+          description: Simulated transactions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Payment"
+  /tutorials:
+    get:
+      operationId: getTutorials
+      tags: [learning]
+      summary: List offline learning tutorials
+      responses:
+        "200":
+          description: Tutorials
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Tutorial"
+  /languages:
+    get:
+      operationId: getLanguages
+      tags: [settings]
+      summary: List supported languages
+      responses:
+        "200":
+          description: Supported languages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Language"
+  /settings:
+    get:
+      operationId: getSettings
+      tags: [settings]
+      summary: Get accessibility settings
+      responses:
+        "200":
+          description: Current settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+    post:
+      operationId: saveSettings
+      tags: [settings]
+      summary: Save accessibility settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SettingsInput"
+      responses:
+        "200":
+          description: Saved settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+  /qr/read:
+    post:
+      operationId: readQr
+      tags: [payments]
+      summary: Read a simulated QR code and run safety checks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QrReadInput"
+      responses:
+        "200":
+          description: QR guidance result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QrReadResult"
+  /qr/history:
+    get:
+      operationId: getQrHistory
+      tags: [payments]
+      summary: List simulated QR scans
+      responses:
+        "200":
+          description: QR history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/QrHistoryItem"
+  /tutorials/{id}/progress:
+    post:
+      operationId: updateTutorialProgress
+      tags: [learning]
+      summary: Save lesson progress
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TutorialProgressInput"
+      responses:
+        "200":
+          description: Saved lesson progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TutorialProgress"
+  /fraud/alerts:
+    get:
+      operationId: getFraudAlerts
+      tags: [learning]
+      summary: List fraud awareness activity
+      responses:
+        "200":
+          description: Fraud awareness history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FraudAlert"
+  /fraud/quiz:
+    post:
+      operationId: submitFraudQuiz
+      tags: [learning]
+      summary: Save a fraud awareness quiz result
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FraudQuizInput"
+      responses:
+        "201":
+          description: Saved fraud quiz result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FraudAlert"
+  /assistant/history:
+    get:
+      operationId: getAssistantHistory
+      tags: [assistant]
+      summary: List Ask Saathi conversation history
+      responses:
+        "200":
+          description: Assistant history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AssistantMessage"
+  /assistant/message:
+    post:
+      operationId: sendAssistantMessage
+      tags: [assistant]
+      summary: Ask Saathi a beginner-friendly question
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssistantMessageInput"
+      responses:
+        "200":
+          description: Assistant response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantMessage"
+  /notifications:
+    get:
+      operationId: getNotifications
+      tags: [notifications]
+      summary: List notifications
+      responses:
+        "200":
+          description: Notifications
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Notification"
+  /notifications/{id}/read:
+    patch:
+      operationId: markNotificationRead
+      tags: [notifications]
+      summary: Mark a notification as read
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Updated notification
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Notification"
+  /notifications/read-all:
+    patch:
+      operationId: markAllNotificationsRead
+      tags: [notifications]
+      summary: Mark all notifications as read
+      responses:
+        "204":
+          description: Notifications marked as read
+  /analytics:
+    get:
+      operationId: getAnalytics
+      tags: [analytics]
+      summary: Get demo activity analytics
+      responses:
+        "200":
+          description: Demo analytics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Analytics"
+  /translate:
+    post:
+      operationId: translateText
+      tags: [assistant]
+      summary: Translate a demo phrase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TranslateInput"
+      responses:
+        "200":
+          description: Demo translation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TranslationResult"
+  /voice/speak:
+    post:
+      operationId: speakText
+      tags: [voice]
+      summary: Prepare text for browser speech synthesis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpeakInput"
+      responses:
+        "200":
+          description: Speech response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeakResult"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +406,424 @@ components:
           type: string
       required:
         - status
+    VoiceInput:
+      type: object
+      required: [transcript]
+      properties:
+        transcript:
+          type: string
+          minLength: 1
+    IntentInput:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          minLength: 1
+        language:
+          type: string
+    PaymentInput:
+      type: object
+      required: [recipient, amount]
+      properties:
+        recipient:
+          type: string
+          minLength: 1
+        amount:
+          type: number
+          minimum: 1
+        source:
+          type: string
+          enum: [voice, qr, manual]
+    IntentResult:
+      type: object
+      required: [transcript, intent, confidence, entities, response]
+      properties:
+        transcript:
+          type: string
+        intent:
+          type: string
+        confidence:
+          type: number
+        entities:
+          $ref: "#/components/schemas/PaymentEntities"
+        response:
+          type: string
+    PaymentEntities:
+      type: object
+      required: [recipient, amount, currency]
+      properties:
+        recipient:
+          type: string
+        amount:
+          type: number
+        currency:
+          type: string
+    SafetyCheck:
+      type: object
+      required: [name, passed, detail]
+      properties:
+        name:
+          type: string
+        passed:
+          type: boolean
+        detail:
+          type: string
+    SafetyResult:
+      type: object
+      required: [safe, warnings, checks, summary]
+      properties:
+        safe:
+          type: boolean
+        warnings:
+          type: array
+          items:
+            type: string
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/SafetyCheck"
+        summary:
+          type: string
+    Payment:
+      type: object
+      required: [id, recipient, amount, date, status, safetyStatus, source, demoLabel, transactionId, paymentType, learningNote]
+      properties:
+        id:
+          type: string
+        recipient:
+          type: string
+        amount:
+          type: number
+        date:
+          type: string
+        status:
+          type: string
+          enum: [completed, pending, cancelled]
+        safetyStatus:
+          type: string
+          enum: [verified, review, blocked]
+        source:
+          type: string
+        demoLabel:
+          type: string
+        transactionId:
+          type: string
+        paymentType:
+          type: string
+        learningNote:
+          type: string
+    Dashboard:
+      type: object
+      required: [userName, accessibilityScore, offlineProgress, safetyAlerts, recentPayments, weeklyActivity]
+      properties:
+        userName:
+          type: string
+        accessibilityScore:
+          type: number
+        offlineProgress:
+          type: number
+        safetyAlerts:
+          type: integer
+        recentPayments:
+          type: array
+          items:
+            $ref: "#/components/schemas/Payment"
+        weeklyActivity:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActivityPoint"
+    ActivityPoint:
+      type: object
+      required: [day, value]
+      properties:
+        day:
+          type: string
+        value:
+          type: integer
+    Tutorial:
+      type: object
+      required: [id, title, description, icon, difficulty, minutes, progress, offline]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        icon:
+          type: string
+        difficulty:
+          type: string
+        minutes:
+          type: integer
+        progress:
+          type: integer
+        offline:
+          type: boolean
+    Language:
+      type: object
+      required: [code, name, nativeName]
+      properties:
+        code:
+          type: string
+        name:
+          type: string
+        nativeName:
+          type: string
+    Settings:
+      type: object
+      required: [profileName, language, voiceGuidance, voiceSelection, speechSpeed, largeText, highContrast, simplifiedMode, reducedMotion, dailySafetyReminders, learningReminders, practiceReminders]
+      properties:
+        profileName:
+          type: string
+        language:
+          type: string
+        voiceGuidance:
+          type: boolean
+        voiceSelection:
+          type: string
+        speechSpeed:
+          type: number
+        largeText:
+          type: boolean
+        highContrast:
+          type: boolean
+        simplifiedMode:
+          type: boolean
+        reducedMotion:
+          type: boolean
+        dailySafetyReminders:
+          type: boolean
+        learningReminders:
+          type: boolean
+        practiceReminders:
+          type: boolean
+    SettingsInput:
+      type: object
+      required: [profileName, language, voiceGuidance, voiceSelection, speechSpeed, largeText, highContrast, simplifiedMode, reducedMotion, dailySafetyReminders, learningReminders, practiceReminders]
+      properties:
+        profileName:
+          type: string
+        language:
+          type: string
+        voiceGuidance:
+          type: boolean
+        voiceSelection:
+          type: string
+        speechSpeed:
+          type: number
+        largeText:
+          type: boolean
+        highContrast:
+          type: boolean
+        simplifiedMode:
+          type: boolean
+        reducedMotion:
+          type: boolean
+        dailySafetyReminders:
+          type: boolean
+        learningReminders:
+          type: boolean
+        practiceReminders:
+          type: boolean
+    QrReadInput:
+      type: object
+      required: [merchant, amount]
+      properties:
+        merchant:
+          type: string
+          minLength: 1
+        amount:
+          type: number
+          minimum: 1
+        source:
+          type: string
+          enum: [upload, camera, sample]
+    QrReadResult:
+      type: object
+      required: [detected, merchant, amount, safe, warnings, checks, summary]
+      properties:
+        detected:
+          type: boolean
+        merchant:
+          type: string
+        amount:
+          type: number
+        safe:
+          type: boolean
+        warnings:
+          type: array
+          items:
+            type: string
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/SafetyCheck"
+        summary:
+          type: string
+    QrHistoryItem:
+      type: object
+      required: [id, merchant, amount, status, createdAt]
+      properties:
+        id:
+          type: string
+        merchant:
+          type: string
+        amount:
+          type: number
+        status:
+          type: string
+        warning:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+    TutorialProgressInput:
+      type: object
+      required: [progress, completed, quizScore, bookmarked]
+      properties:
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        completed:
+          type: boolean
+        quizScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+        bookmarked:
+          type: boolean
+    TutorialProgress:
+      allOf:
+        - $ref: "#/components/schemas/TutorialProgressInput"
+        - type: object
+          required: [tutorialId]
+          properties:
+            tutorialId:
+              type: string
+    FraudQuizInput:
+      type: object
+      required: [category, result]
+      properties:
+        category:
+          type: string
+        result:
+          type: string
+    FraudAlert:
+      type: object
+      required: [id, category, result, createdAt]
+      properties:
+        id:
+          type: string
+        category:
+          type: string
+        result:
+          type: string
+        createdAt:
+          type: string
+    AssistantMessageInput:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          minLength: 1
+        language:
+          type: string
+    AssistantMessage:
+      type: object
+      required: [id, from, message, createdAt]
+      properties:
+        id:
+          type: string
+        from:
+          type: string
+          enum: [you, saathi]
+        message:
+          type: string
+        createdAt:
+          type: string
+    Notification:
+      type: object
+      required: [id, type, title, message, read, createdAt]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        title:
+          type: string
+        message:
+          type: string
+        read:
+          type: boolean
+        createdAt:
+          type: string
+    Analytics:
+      type: object
+      required: [practiceSessions, lessonsCompleted, assistantUses, fraudQuizScore, accessibilityUsage, paymentSimulations, languageUsage]
+      properties:
+        practiceSessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActivityPoint"
+        lessonsCompleted:
+          type: integer
+        assistantUses:
+          type: integer
+        fraudQuizScore:
+          type: integer
+        accessibilityUsage:
+          type: integer
+        paymentSimulations:
+          type: integer
+        languageUsage:
+          type: array
+          items:
+            $ref: "#/components/schemas/LanguageUsage"
+    LanguageUsage:
+      type: object
+      required: [language, value]
+      properties:
+        language:
+          type: string
+        value:
+          type: integer
+    TranslateInput:
+      type: object
+      required: [text, language]
+      properties:
+        text:
+          type: string
+        language:
+          type: string
+    TranslationResult:
+      type: object
+      required: [text, language, translatedText]
+      properties:
+        text:
+          type: string
+        language:
+          type: string
+        translatedText:
+          type: string
+    SpeakInput:
+      type: object
+      required: [text, language]
+      properties:
+        text:
+          type: string
+        language:
+          type: string
+    SpeakResult:
+      type: object
+      required: [text, language, supported]
+      properties:
+        text:
+          type: string
+        language:
+          type: string
+        supported:
+          type: boolean
 
