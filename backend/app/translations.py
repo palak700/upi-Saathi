@@ -188,6 +188,36 @@ LANGUAGES = [
     {"code": "raj", "name": "Rajasthani", "nativeName": "राजस्थानी"},
 ]
 
+DEMO_PHRASES: dict[str, str] = {
+    "en": "I will show you before you pay.",
+    "hi": "आपके पैसे देने से पहले मैं आपको दिखाऊँगा।",
+    "mr": "तुम्ही पैसे देण्याआधी मी तुम्हाला दाखवतो.",
+    "ta": "நீங்கள் பணம் செலுத்தும் முன் நான் உங்களுக்குக் காண்பிக்கிறேன்.",
+    "te": "మీరు చెల్లించే ముందు నేను మీకు చూపిస్తాను.",
+    "gu": "તમે પૈસા ચૂકવો તે પહેલાં હું તમને બતાવીશ.",
+    "bn": "আপনি টাকা দেওয়ার আগে আমি আপনাকে দেখাব।",
+    "kn": "ನೀವು ಹಣ ಪಾವತಿಸುವ ಮೊದಲು ನಾನು ನಿಮಗೆ ತೋರಿಸುತ್ತೇನೆ.",
+    "ml": "നിങ്ങൾ പണം നൽകുന്നതിന് മുമ്പ് ഞാൻ കാണിച്ചുതരാം.",
+    "pa": "ਤੁਸੀਂ ਪੈਸੇ ਦੇਣ ਤੋਂ ਪਹਿਲਾਂ ਮੈਂ ਤੁਹਾਨੂੰ ਦਿਖਾਵਾਂਗਾ।",
+    "raj": "आप पैसे देणै से पैलै मैं आपने दिखाऊँ।",
+}
+
+PHRASE_KEYS: dict[str, str] = {
+    "I will show you before you pay.": "demo.phrase",
+    "Never enter your UPI PIN to receive money.": "dot.pop",
+    "Payment of {amount} to {recipient} was successful.": "pay.success",
+    "Saathi confirmed your payment of {amount} to {recipient}.": "pay.notify",
+}
+
+
+def localize(language: str, text: str) -> str:
+    """Localize ``text`` when it matches a known phrase, otherwise echo it back
+    so the returned string is always exactly what a caller asked to display or
+    speak."""
+    if text in PHRASE_KEYS:
+        return translate(language, PHRASE_KEYS[text])
+    return text
+
 
 def translate(language: str, key: str, **kwargs) -> str:
     """Translate ``key`` into ``language`` interpolating ``kwargs``.
@@ -195,6 +225,8 @@ def translate(language: str, key: str, **kwargs) -> str:
     Falls back to English, then to the raw key, so a missing translation never
     raises or returns a broken string.
     """
+    if key == "demo.phrase":
+        return DEMO_PHRASES.get(language) or DEMO_PHRASES["en"]
     table = CATALOGUE.get(language) or {}
     template = table.get(key) or CATALOGUE["en"].get(key) or key
     try:

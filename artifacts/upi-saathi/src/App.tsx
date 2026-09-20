@@ -181,6 +181,20 @@ const speechLang = {
 } as const;
 
 type SpeechLanguage = keyof typeof speechLang;
+type SpeechRecognitionInstance = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  maxAlternatives: number;
+  start: () => void;
+  stop: () => void;
+  onstart: (() => void) | null;
+  onresult: ((event: { results: { [key: number]: { [key: number]: { transcript: string } } } }) => void) | null;
+  onend: (() => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionInstance;
 
 function speakText(text: string, language: SpeechLanguage = 'en') {
   speakLocalized(text, language);
@@ -279,7 +293,10 @@ function AppShell({ children }: { children: ReactNode }) {
 }
 
 function PageIntro({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: string; action?: ReactNode }) {
-  return <div className="mb-8 flex flex-col justify-between gap-5 md:flex-row md:items-end"><div><p className="mb-3 text-xs font-bold uppercase tracking-[.2em] text-[hsl(var(--primary))]">{eyebrow}</p><h1 className="display-font max-w-3xl text-4xl font-extrabold leading-[1.05] tracking-[-.045em] text-[hsl(var(--foreground))] md:text-5xl">{title}</h1><p className="mt-4 max-w-2xl text-base leading-7 text-[hsl(var(--muted-foreground))]">{description}</p></div>{action}</div>;
+  const { data: settings } = useGetSettings();
+  const language = (settings?.language ?? 'en') as SpeechLanguage;
+  const listen = () => { if (!window.speechSynthesis) return; speakWhenReady(`${eyebrow}. ${title}. ${description}`, language); };
+  return <div className="mb-8 flex flex-col justify-between gap-5 md:flex-row md:items-end"><div><div className="mb-3 flex items-center gap-3"><p className="text-xs font-bold uppercase tracking-[.2em] text-[hsl(var(--primary))]">{eyebrow}</p><button onClick={listen} aria-label="Speak this instruction" data-testid="button-speak-instruction" className="inline-flex items-center gap-1.5 rounded-full border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-1.5 text-xs font-bold text-[hsl(var(--primary))] transition-colors hover:bg-[hsl(var(--muted))]"><Volume2 size={13} /> Listen</button></div><h1 className="display-font max-w-3xl text-4xl font-extrabold leading-[1.05] tracking-[-.045em] text-[hsl(var(--foreground))] md:text-5xl">{title}</h1><p className="mt-4 max-w-2xl text-base leading-7 text-[hsl(var(--muted-foreground))]">{description}</p></div>{action}</div>;
 }
 
 function SimulatedNotice() {
@@ -336,7 +353,7 @@ function VoicePayment() {
   const guide = useGuidePayment();
   const confirm = useConfirmPayment();
   const client = useQueryClient();
-  const [phrase, setPhrase] = useState('Send ₹500 to Mom');
+  const [phrase, setPhrase] = useState('Recharge my phone');
   const [result, setResult] = useState<{ transcript: string; intent: string; confidence: number; entities: { recipient: string; amount: number; currency: string }; response: string } | null>(null);
   const [safety, setSafety] = useState<{ safe: boolean; warnings: string[]; checks: { name: string; passed: boolean; detail: string }[]; summary: string } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -354,23 +371,72 @@ function VoicePayment() {
     setError(''); setConfirmed(false); setSafety(null);
     transcribe.mutate({ data: { transcript: text } }, { onSuccess: (voiceResult) => { setResult(voiceResult); detect.mutate({ data: { text: voiceResult.transcript, language: 'en' } }, { onSuccess: setResult }); }, onError: () => setError('The demo phrase could not be understood. Try the example once more.') });
   };
-  const startListening = () => {
+  const startListening = async () => {
+    setError('');
+    setConfirmed(false);
+    setSafety(null);
+    setResult(null);
     setIsListening(true);
-    const SpeechRecognitionApi = (window as Window & { SpeechRecognition?: new () => { lang: string; start: () => void; onresult: ((event: { results: { [key: number]: { [key: number]: { transcript: string } } } }) => void) | null; onend: (() => void) | null; onerror: (() => void) | null } }).SpeechRecognition;
-    if (SpeechRecognitionApi) {
-      const recognition = new SpeechRecognitionApi();
-      recognition.lang = 'en-IN';
-      recognition.onresult = (event) => { const text = event.results[0][0].transcript; setPhrase(text); setIsListening(false); runPhrase(text); };
-      recognition.onend = () => setIsListening(false);
-      recognition.onerror = () => { setIsListening(false); runPhrase(phrase); };
+
+    const speechWindow = window as Window & {
+      SpeechRecognition?: SpeechRecognitionConstructor;
+      webkitSpeechRecognition?: SpeechRecognitionConstructor;
+    };
+    const SpeechRecognitionApi = speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+    if (!SpeechRecognitionApi) {
+      setIsListening(false);
+      setError('This browser does not support speech recognition. Please type the phrase and tap Try it.');
+      return;
+    }
+
+    if (!window.isSecureContext) {
+      setIsListening(false);
+      setError('Microphone access needs a secure page. Use localhost or HTTPS.');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+    } catch {
+      setIsListening(false);
+      setError('Microphone permission is blocked. Allow microphone access in the address bar, then tap again.');
+      return;
+    }
+
+    const recognition = new SpeechRecognitionApi();
+    let heardSpeech = false;
+    recognition.lang = 'en-US';
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.onstart = () => setIsListening(true);
+    recognition.onresult = (event) => {
+      heardSpeech = true;
+      const text = event.results[0][0].transcript;
+      setPhrase(text);
+      setIsListening(false);
+      runPhrase(text);
+    };
+    recognition.onend = () => setIsListening(false);
+    recognition.onerror = (event) => {
+      setIsListening(false);
+      if (heardSpeech) return;
+      const message = event.error === 'not-allowed' || event.error === 'service-not-allowed'
+        ? 'Microphone permission is blocked. Allow microphone access in the address bar, then tap again.'
+        : 'I did not hear speech. Speak right after tapping the mic, check your Windows input microphone, or type the phrase below.';
+      setError(message);
+    };
+    try {
       recognition.start();
-    } else {
-      window.setTimeout(() => { setIsListening(false); runPhrase(phrase); }, 700);
+    } catch {
+      setIsListening(false);
+      setError('The microphone is already starting. Wait a moment, then tap again.');
     }
   };
   const guideIt = () => { if (!result) return; guide.mutate({ data: { recipient: result.entities.recipient, amount: result.entities.amount, source: 'voice' } }, { onSuccess: setSafety, onError: () => setError('We could not complete the safety check.') }); };
   const confirmIt = () => { if (!result) return; confirm.mutate({ data: { recipient: result.entities.recipient, amount: result.entities.amount, source: 'voice' } }, { onSuccess: (saved) => { setPayment(saved); setConfirmed(true); speak(`Your simulated payment of ${result.entities.amount} rupees to ${result.entities.recipient} has been completed successfully.`); client.invalidateQueries({ queryKey: getGetDashboardQueryKey() }); client.invalidateQueries({ queryKey: getGetHistoryQueryKey() }); client.invalidateQueries({ queryKey: getGetNotificationsQueryKey() }); } }); };
-  return <><PageIntro eyebrow="Voice payment" title="Say what you need. We’ll slow it down." description="Try a natural phrase. Saathi will repeat the important parts, check them, and wait for your say-so." /><div className="grid gap-6 lg:grid-cols-[.85fr_1.15fr]"><section className="app-card rounded-3xl p-6 md:p-8"><SimulatedNotice /><div className="mt-10 text-center"><button onClick={startListening} className={`pulse-ring mx-auto grid h-36 w-36 place-items-center rounded-full bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] transition-transform hover:scale-[1.03] ${isListening ? 'bg-[hsl(var(--accent))] text-[hsl(var(--accent-foreground))]' : ''}`} aria-label="Start listening" data-testid="button-start-listening">{isListening ? <Volume2 size={43} /> : <Mic size={43} />}</button><p className="mt-7 text-sm font-bold text-[hsl(var(--primary))]">{isListening ? 'I am listening…' : 'Tap to try the voice demo'}</p><p className="mx-auto mt-2 max-w-xs text-sm leading-6 text-[hsl(var(--muted-foreground))]">You can also type the sentence below. Both ways use the same safe practice flow.</p></div><label className="mt-9 block text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--muted-foreground))]" htmlFor="voice-phrase">Your phrase</label><div className="mt-2 flex gap-2"><input id="voice-phrase" value={phrase} onChange={(event) => setPhrase(event.target.value)} className="min-w-0 flex-1 rounded-xl border border-[hsl(var(--input))] bg-[hsl(var(--card))] px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]" data-testid="input-voice-phrase" /><button onClick={() => runPhrase(phrase)} className="rounded-xl bg-[hsl(var(--secondary))] px-4 text-sm font-bold text-[hsl(var(--primary))]" data-testid="button-submit-voice">Try it</button></div><div className="mt-4 flex flex-wrap gap-2">{['Send ₹500 to Mom', 'Pay Meera ₹245', 'Recharge my phone'].map((sample) => <button key={sample} onClick={() => { setPhrase(sample); runPhrase(sample); }} className="rounded-full border border-[hsl(var(--border))] px-3 py-1.5 text-xs font-semibold text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary))] hover:text-[hsl(var(--primary))]" data-testid={`button-sample-${sample.replaceAll(' ', '-').replace('₹', 'rs')}`}>{sample}</button>)}</div>{error && <p className="mt-4 rounded-xl bg-[hsl(var(--destructive)/.09)] p-3 text-sm font-semibold text-[hsl(var(--destructive))]" data-testid="status-voice-error">{error}</p>}</section><section className="app-card rounded-3xl p-6 md:p-8"><div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-[hsl(var(--muted-foreground))]">Your guided preview</p><h2 className="display-font mt-2 text-2xl font-bold">Nothing happens without you</h2></div><span className="rounded-full bg-[hsl(var(--secondary))] px-3 py-1.5 text-xs font-bold text-[hsl(var(--primary))]">{confirmed ? 'Complete' : safety ? 'Ready to review' : result ? 'Understood' : 'Waiting'}</span></div>{busy && <div className="mt-8 space-y-3"><Skeleton className="h-16" /><Skeleton className="h-24" /></div>}{!busy && !result && !confirmed && <EmptyState title="Your words will appear here" detail="Tap the microphone or try the example phrase. Saathi will show you every important detail." />}{result && !confirmed && <div className="mt-8 space-y-5"><div className="rounded-2xl bg-[hsl(var(--secondary))] p-5"><p className="text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--primary))]">I heard</p><p className="mt-2 text-lg font-bold">“{result.transcript}”</p><p className="mt-3 text-sm leading-6 text-[hsl(var(--muted-foreground))]">{result.response}</p></div><div className="grid gap-3 sm:grid-cols-3"><Entity label="To" value={result.entities.recipient} /><Entity label="Amount" value={`₹${result.entities.amount}`} /><Entity label="Confidence" value={`${Math.round(result.confidence * 100)}%`} /></div>{!safety ? <button onClick={guideIt} disabled={guide.isPending} className="flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))] disabled:opacity-60" data-testid="button-run-safety">{guide.isPending ? 'Checking…' : 'Check these details' } <ArrowRight size={16} /></button> : <div className={`rounded-2xl border p-5 ${safety.safe ? 'border-[hsl(153_42%_42%/.25)] bg-[hsl(153_42%_42%/.08)]' : 'border-[hsl(36_80%_54%/.35)] bg-[hsl(36_80%_54%/.1)]'}`}><div className={`flex items-center gap-2 font-bold ${safety.safe ? 'text-[hsl(153_42%_35%)]' : 'text-[hsl(36_70%_37%)]'}`}>{safety.safe ? <CheckCircle2 size={19} /> : <ShieldQuestion size={19} />} {safety.safe ? safety.summary : 'Safety alert — review before continuing'}</div>{safety.warnings.length > 0 && <div className="mt-3 rounded-xl bg-[hsl(36_80%_54%/.15)] p-3 text-sm font-semibold text-[hsl(36_70%_37%)]">{safety.warnings.join(' ')}</div>}<div className="mt-4 space-y-2">{safety.checks.map((check) => <div key={check.name} className="flex gap-2 text-sm"><Check size={15} className={`mt-0.5 ${check.passed ? 'text-[hsl(153_42%_42%)]' : 'text-[hsl(36_70%_37%)]'}`} /><span><b>{check.name}:</b> {check.detail}</span></div>)}</div><button onClick={confirmIt} disabled={confirm.isPending} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))] disabled:opacity-60" data-testid="button-confirm-payment">{confirm.isPending ? 'Saving practice result…' : 'Confirm practice payment'} <Check size={16} /></button></div>}</div>}{confirmed && <div className="flex min-h-[320px] flex-col items-center justify-center text-center"><span className="grid h-16 w-16 place-items-center rounded-full bg-[hsl(153_42%_42%/.12)] text-[hsl(153_42%_35%)]"><CheckCircle2 size={32} /></span><h3 className="display-font mt-5 text-2xl font-bold">Practice payment complete</h3><p className="mt-2 max-w-sm text-sm leading-6 text-[hsl(var(--muted-foreground))]">You checked the recipient and amount before confirming. That is the habit that keeps payments safer.</p><Link href="/dashboard" className="mt-6 rounded-xl bg-[hsl(var(--primary))] px-5 py-3 text-sm font-bold text-[hsl(var(--primary-foreground))]" data-testid="link-back-dashboard">Back to my day</Link></div>}</section></div></>;
+  return <><PageIntro eyebrow="Voice payment" title="Say what you need. We’ll slow it down." description="Try a natural phrase. Saathi will repeat the important parts, check them, and wait for your say-so." /><div className="grid gap-6 lg:grid-cols-[.85fr_1.15fr]"><section className="app-card rounded-3xl p-6 md:p-8"><SimulatedNotice /><div className="mt-10 text-center"><button onClick={startListening} className={`pulse-ring mx-auto grid h-36 w-36 place-items-center rounded-full bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] transition-transform hover:scale-[1.03] ${isListening ? 'bg-[hsl(var(--accent))] text-[hsl(var(--accent-foreground))]' : ''}`} aria-label="Start listening" data-testid="button-start-listening">{isListening ? <Volume2 size={43} /> : <Mic size={43} />}</button><p className="mt-7 text-sm font-bold text-[hsl(var(--primary))]">{isListening ? 'I am listening…' : 'Tap to try the voice demo'}</p><p className="mx-auto mt-2 max-w-xs text-sm leading-6 text-[hsl(var(--muted-foreground))]">You can also type the sentence below. Both ways use the same safe practice flow.</p></div><label className="mt-9 block text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--muted-foreground))]" htmlFor="voice-phrase">Your phrase</label><div className="mt-2 flex gap-2"><input id="voice-phrase" value={phrase} onChange={(event) => setPhrase(event.target.value)} className="min-w-0 flex-1 rounded-xl border border-[hsl(var(--input))] bg-[hsl(var(--card))] px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]" data-testid="input-voice-phrase" /><button onClick={() => runPhrase(phrase)} className="rounded-xl bg-[hsl(var(--secondary))] px-4 text-sm font-bold text-[hsl(var(--primary))]" data-testid="button-submit-voice">Try it</button></div><div className="mt-4 flex flex-wrap gap-2">{['Recharge my phone', 'Pay Meera ₹245', 'Pay Rahul ₹150'].map((sample) => <button key={sample} onClick={() => { setPhrase(sample); runPhrase(sample); }} className="rounded-full border border-[hsl(var(--border))] px-3 py-1.5 text-xs font-semibold text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary))] hover:text-[hsl(var(--primary))]" data-testid={`button-sample-${sample.replaceAll(' ', '-').replace('₹', 'rs')}`}>{sample}</button>)}</div>{error && <p className="mt-4 rounded-xl bg-[hsl(var(--destructive)/.09)] p-3 text-sm font-semibold text-[hsl(var(--destructive))]" data-testid="status-voice-error">{error}</p>}</section><section className="app-card rounded-3xl p-6 md:p-8"><div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-[hsl(var(--muted-foreground))]">Your guided preview</p><h2 className="display-font mt-2 text-2xl font-bold">Nothing happens without you</h2></div><span className="rounded-full bg-[hsl(var(--secondary))] px-3 py-1.5 text-xs font-bold text-[hsl(var(--primary))]">{confirmed ? 'Complete' : safety ? 'Ready to review' : result ? 'Understood' : 'Waiting'}</span></div>{busy && <div className="mt-8 space-y-3"><Skeleton className="h-16" /><Skeleton className="h-24" /></div>}{!busy && !result && !confirmed && <EmptyState title="Your words will appear here" detail="Tap the microphone or try the example phrase. Saathi will show you every important detail." />}{result && !confirmed && <div className="mt-8 space-y-5"><div className="rounded-2xl bg-[hsl(var(--secondary))] p-5"><p className="text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--primary))]">I heard</p><p className="mt-2 text-lg font-bold">“{result.transcript}”</p><p className="mt-3 text-sm leading-6 text-[hsl(var(--muted-foreground))]">{result.response}</p></div><div className="grid gap-3 sm:grid-cols-3"><Entity label="To" value={result.entities.recipient || 'Needed'} /><Entity label="Amount" value={result.entities.amount > 0 ? `₹${result.entities.amount}` : 'Needed'} /><Entity label="Confidence" value={`${Math.round(result.confidence * 100)}%`} /></div>{!safety ? <button onClick={guideIt} disabled={guide.isPending || result.entities.amount <= 0 || !result.entities.recipient} className="flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))] disabled:opacity-60" data-testid="button-run-safety">{guide.isPending ? 'Checking…' : 'Check these details' } <ArrowRight size={16} /></button> : <div className={`rounded-2xl border p-5 ${safety.safe ? 'border-[hsl(153_42%_42%/.25)] bg-[hsl(153_42%_42%/.08)]' : 'border-[hsl(36_80%_54%/.35)] bg-[hsl(36_80%_54%/.1)]'}`}><div className={`flex items-center gap-2 font-bold ${safety.safe ? 'text-[hsl(153_42%_35%)]' : 'text-[hsl(36_70%_37%)]'}`}>{safety.safe ? <CheckCircle2 size={19} /> : <ShieldQuestion size={19} />} {safety.safe ? safety.summary : 'Safety alert — review before continuing'}</div>{safety.warnings.length > 0 && <div className="mt-3 rounded-xl bg-[hsl(36_80%_54%/.15)] p-3 text-sm font-semibold text-[hsl(36_70%_37%)]">{safety.warnings.join(' ')}</div>}<div className="mt-4 space-y-2">{safety.checks.map((check) => <div key={check.name} className="flex gap-2 text-sm"><Check size={15} className={`mt-0.5 ${check.passed ? 'text-[hsl(153_42%_42%)]' : 'text-[hsl(36_70%_37%)]'}`} /><span><b>{check.name}:</b> {check.detail}</span></div>)}</div><button onClick={confirmIt} disabled={confirm.isPending} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))] disabled:opacity-60" data-testid="button-confirm-payment">{confirm.isPending ? 'Saving practice result…' : 'Confirm practice payment'} <Check size={16} /></button></div>}</div>}{confirmed && <div className="flex min-h-[320px] flex-col items-center justify-center text-center"><span className="grid h-16 w-16 place-items-center rounded-full bg-[hsl(153_42%_42%/.12)] text-[hsl(153_42%_35%)]"><CheckCircle2 size={32} /></span><h3 className="display-font mt-5 text-2xl font-bold">Practice payment complete</h3><p className="mt-2 max-w-sm text-sm leading-6 text-[hsl(var(--muted-foreground))]">You checked the recipient and amount before confirming. That is the habit that keeps payments safer.</p><Link href="/dashboard" className="mt-6 rounded-xl bg-[hsl(var(--primary))] px-5 py-3 text-sm font-bold text-[hsl(var(--primary-foreground))]" data-testid="link-back-dashboard">Back to my day</Link></div>}</section></div></>;
 }
 
 function Entity({ label, value }: { label: string; value: string }) {
@@ -908,7 +974,7 @@ function QrGuidance() {
           data: {
             merchant: result.merchant,
             amount: result.amount,
-            source: 'qr',
+            source: 'camera',
           },
         },
         {
@@ -1295,8 +1361,9 @@ function Multilingual() {
   const [selected, setSelected] = useState('en');
   const [playing, setPlaying] = useState(false);
   const [translated, setTranslated] = useState('I will show you before you pay.');
-  const speak = (language: string) => { setSelected(language); setPlaying(true); save.mutate({ data: { ...fallbackSettings, language } }); translate.mutate({ data: { text: 'I will show you before you pay.', language } }, { onSuccess: (result) => setTranslated(result.translatedText) }); speakDemo.mutate({ data: { text: 'I will show you before you pay.', language } }, { onSuccess: (result) => speakLocalized(result.text, language) }); window.setTimeout(() => setPlaying(false), 1400); };
-  return <><PageIntro eyebrow="Language demo" title="Understanding should sound familiar." description="Saathi can guide you in the language you use at home. Choose one to hear the same reassurance in a different voice." /><div className="grid gap-6 lg:grid-cols-[1.08fr_.92fr]"><section className="app-card rounded-3xl p-6 md:p-8"><div className="grid gap-3 sm:grid-cols-2">{isLoading ? Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-20" />) : languages.map((language) => <button key={language.code} onClick={() => speak(language.code)} className={`flex items-center gap-4 rounded-2xl border p-4 text-left transition-transform hover:-translate-y-0.5 ${selected === language.code ? 'border-[hsl(var(--accent))] bg-[hsl(var(--accent)/.08)]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))]'}`} data-testid={`button-language-${language.code}`}><span className="grid h-10 w-10 place-items-center rounded-xl bg-[hsl(var(--secondary))] text-xs font-bold text-[hsl(var(--primary))]">{language.code.toUpperCase()}</span><span><b className="block">{language.name}</b><span className="mt-1 block text-sm text-[hsl(var(--muted-foreground))]">{language.nativeName}</span></span>{selected === language.code && <CheckCircle2 className="ml-auto text-[hsl(var(--accent))]" size={19} />}</button>)}</div></section><section className="app-card flex min-h-[340px] flex-col justify-between rounded-3xl bg-[hsl(var(--primary))] p-7 text-[hsl(var(--primary-foreground))]"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-[hsl(var(--primary-foreground)/.58)]">Saathi says</p><span className="mt-8 grid h-14 w-14 place-items-center rounded-2xl bg-[hsl(var(--accent))] text-[hsl(var(--accent-foreground))]"><Volume2 size={25} /></span><h2 className="display-font mt-6 text-3xl font-bold leading-tight">“{translated}”</h2><p className="mt-4 text-sm text-[hsl(var(--primary-foreground)/.65)]">{languages.find((language) => language.code === selected)?.nativeName ?? 'English'} guidance preview</p></div><button onClick={() => speak(selected)} className="mt-8 flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--accent))] px-4 py-3 text-sm font-bold text-[hsl(var(--accent-foreground))]" data-testid="button-play-language">{playing ? <Pause size={16} /> : <Play size={16} />}{playing ? 'Playing preview…' : 'Play this preview'}</button></section></div></>;
+  const [spokenText, setSpokenText] = useState('I will show you before you pay.');
+  const speak = (language: string) => { setSelected(language); setPlaying(true); save.mutate({ data: { ...fallbackSettings, language } }); const phrase = 'I will show you before you pay.'; setTranslated(phrase); setSpokenText(phrase); translate.mutate({ data: { text: phrase, language } }, { onSuccess: (result) => { const text = result.translatedText?.trim() || phrase; setTranslated(text); setSpokenText(text); }, onError: () => { setTranslated(phrase); setSpokenText(phrase); } }); speakDemo.mutate({ data: { text: phrase, language } }, { onSuccess: (result) => { const text = result.text?.trim() || translated || phrase; setSpokenText(text); speakLocalized(text, language); }, onError: () => speakLocalized(spokenText || phrase, language) }); window.setTimeout(() => setPlaying(false), 1400); };
+  return <><PageIntro eyebrow="Language demo" title="Understanding should sound familiar." description="Saathi can guide you in the language you use at home. Choose one to hear the same reassurance in a different voice." /><div className="grid gap-6 lg:grid-cols-[1.08fr_.92fr]"><section className="app-card rounded-3xl p-6 md:p-8"><div className="grid gap-3 sm:grid-cols-2">{isLoading ? Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-20" />) : languages.map((language) => <button key={language.code} onClick={() => speak(language.code)} className={`flex items-center gap-4 rounded-2xl border p-4 text-left transition-transform hover:-translate-y-0.5 ${selected === language.code ? 'border-[hsl(var(--accent))] bg-[hsl(var(--accent)/.08)]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))]'}`} data-testid={`button-language-${language.code}`}><span className="grid h-10 w-10 place-items-center rounded-xl bg-[hsl(var(--secondary))] text-xs font-bold text-[hsl(var(--primary))]">{language.code.toUpperCase()}</span><span><b className="block">{language.name}</b><span className="mt-1 block text-sm text-[hsl(var(--muted-foreground))]">{language.nativeName}</span></span>{selected === language.code && <CheckCircle2 className="ml-auto text-[hsl(var(--accent))]" size={19} />}</button>)}</div></section><section className="app-card flex min-h-[380px] flex-col justify-between rounded-3xl p-7 text-[hsl(var(--foreground))]"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-[hsl(var(--muted-foreground))]">Saathi says</p><span className="mt-8 grid h-14 w-14 place-items-center rounded-2xl bg-[hsl(var(--accent))] text-[hsl(var(--accent-foreground))]"><Volume2 size={25} /></span><h2 className="display-font mt-6 text-3xl font-bold leading-tight text-[hsl(var(--foreground))]">“{spokenText || translated}”</h2><div className="mt-5 rounded-2xl bg-[hsl(var(--secondary))] p-4 text-sm leading-6 text-[hsl(var(--foreground))]"><p className="text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--primary))]">Text being spoken</p><p className="mt-2 font-semibold">{spokenText || translated}</p><p className="mt-3 text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--primary))]">English meaning</p><p className="mt-2 text-[hsl(var(--muted-foreground))]">I will show you before you pay.</p></div><p className="mt-4 text-sm text-[hsl(var(--muted-foreground))]">{languages.find((language) => language.code === selected)?.nativeName ?? 'English'} guidance preview</p></div><button onClick={() => speak(selected)} className="mt-8 flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--accent))] px-4 py-3 text-sm font-bold text-[hsl(var(--accent-foreground))]" data-testid="button-play-language">{playing ? <Pause size={16} /> : <Play size={16} />}{playing ? 'Playing preview…' : 'Play this preview'}</button></section></div></>;
 }
 
 function LiteracyMode() {

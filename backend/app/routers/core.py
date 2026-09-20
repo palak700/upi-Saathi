@@ -55,7 +55,7 @@ from ..schemas import (
     VoiceSettingsOut,
 )
 from ..services import build_analytics, detect_intent, serialize_payment
-from ..translations import LANGUAGES, translate
+from ..translations import LANGUAGES, localize
 from ..voice import detect_voice_intent, normalize_numerals
 
 router = APIRouter(tags=["core"])
@@ -360,7 +360,7 @@ def translate_endpoint(body: TranslateTextBody):
     return {
         "text": body.text,
         "language": language,
-        "translatedText": translate(language, "dot.pop"),
+        "translatedText": localize(language, body.text),
     }
 
 
@@ -368,7 +368,7 @@ def translate_endpoint(body: TranslateTextBody):
 def speak_endpoint(body: SpeakTextBody):
     language = body.language or "en"
     return {
-        "text": translate(language, "pay.notify", amount="₹100", recipient="Mom"),
+        "text": localize(language, body.text),
         "language": language,
         "supported": True,
     }
