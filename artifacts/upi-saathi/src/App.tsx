@@ -1,4 +1,9 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import {
   Activity,
@@ -43,6 +48,10 @@ import {
   WalletCards,
   X,
 } from 'lucide-react';
+import {
+  BrowserQRCodeReader,
+  BrowserCodeReader,
+} from "@zxing/browser";
 import {
   getGetAnalyticsQueryKey,
   getGetAssistantHistoryQueryKey,
@@ -444,15 +453,808 @@ function SampleUpiQr() {
     </svg>
   );
 }
+function RealQrScanner({
+  onScan,
+  onClose,
+}: {
+  onScan: (decodedText: string) => void;
+  onClose: () => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const controlsRef = useRef<{ stop: () => void } | null>(null);
+  const readerRef = useRef<BrowserQRCodeReader | null>(null);
+  const onScanRef = useRef(onScan);
+
+  const [status, setStatus] = useState("Starting camera...");
+  const [cameraName, setCameraName] = useState("");
+
+  useEffect(() => {
+    onScanRef.current = onScan;
+  }, [onScan]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const startScanner = async () => {
+      try {
+        setStatus("Finding camera...");
+
+        const devices =
+          await BrowserCodeReader.listVideoInputDevices();
+
+        console.log("AVAILABLE CAMERAS:", devices);
+
+        if (!devices.length) {
+          throw new Error("No camera found");
+        }
+
+        // Prefer a rear/environment camera when available.
+        const selectedCamera =
+          devices.find((device) =>
+            /back|rear|environment/i.test(device.label)
+          ) ?? devices[devices.length - 1];
+
+        console.log("USING CAMERA:", selectedCamera);
+
+        if (!mounted) return;
+
+        setCameraName(
+          selectedCamera.label || "Camera"
+        );
+
+        const reader = new BrowserQRCodeReader();
+
+        readerRef.current = reader;
+
+        setStatus("Point the camera at the QR code");
+
+        if (!videoRef.current) {
+          throw new Error("Video element not available");
+        }
+
+        const controls =
+          await reader.decodeFromVideoDevice(
+            selectedCamera.deviceId,
+            videoRef.current,
+            (result, error) => {
+              if (!mounted) return;
+
+              if (result) {
+                const decodedText =
+                  result.getText();
+
+                console.log(
+                  "================================="
+                );
+                console.log(
+                  "QR CODE DETECTED!"
+                );
+                console.log(
+                  "DECODED TEXT:",
+                  decodedText
+                );
+                console.log("DECODED TEXT LENGTH:", decodedText.length);
+console.log("DECODED TEXT JSON:", JSON.stringify(decodedText));
+console.log("IS UPI:", decodedText.toLowerCase().startsWith("upi://pay"));
+                console.log(
+                  "================================="
+                );
+
+                setStatus("QR code detected!");
+
+                controls.stop();
+                controlsRef.current = null;
+
+                onScanRef.current(
+                  decodedText
+                );
+
+                return;
+              }
+
+              // NotFoundException is normal
+              // while looking through frames.
+              if (error) {
+                console.debug(
+                  "QR frame not decoded:",
+                  error
+                );
+              }
+            }
+          );
+
+        controlsRef.current = controls;
+
+        console.log(
+          "ZXING QR CAMERA STARTED SUCCESSFULLY"
+        );
+      } catch (error) {
+        console.error(
+          "ZXING QR SCANNER ERROR:",
+          error
+        );
+
+        if (mounted) {
+          setStatus(
+            `Camera scanner error: ${
+              error instanceof Error
+                ? error.message
+                : String(error)
+            }`
+          );
+        }
+      }
+    };
+
+    startScanner();
+
+    return () => {
+      mounted = false;
+
+      if (controlsRef.current) {
+        try {
+          controlsRef.current.stop();
+        } catch (error) {
+          console.log(
+            "Scanner cleanup:",
+            error
+          );
+        }
+
+        controlsRef.current = null;
+      }
+
+      readerRef.current = null;
+    };
+  }, []);
+
+  const handleImageScan = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = event.target.files?.[0];
+
+    if (!file) return;
+
+    try {
+      setStatus("Reading QR image...");
+
+      console.log(
+        "QR IMAGE SELECTED:",
+        file.name
+      );
+
+      const reader =
+        new BrowserQRCodeReader();
+
+      const imageUrl =
+        URL.createObjectURL(file);
+
+      try {
+        const result =
+          await reader.decodeFromImageUrl(
+            imageUrl
+          );
+
+        const decodedText =
+          result.getText();
+
+        console.log(
+          "================================="
+        );
+        console.log(
+          "QR IMAGE DETECTED!"
+        );
+        console.log(
+          "DECODED TEXT:",
+          decodedText
+        );
+        console.log(
+          "================================="
+        );
+
+        setStatus("QR code detected!");
+
+        onScanRef.current(
+          decodedText
+        );
+      } finally {
+        URL.revokeObjectURL(imageUrl);
+      }
+    } catch (error) {
+      console.error(
+        "QR IMAGE SCAN ERROR:",
+        error
+      );
+
+      setStatus(
+        "Could not read this QR image. Please upload a clearer image."
+      );
+    }
+
+    event.target.value = "";
+  };
+
+  const handleClose = () => {
+    if (controlsRef.current) {
+      try {
+        controlsRef.current.stop();
+      } catch (error) {
+        console.log(
+          "Scanner stop:",
+          error
+        );
+      }
+
+      controlsRef.current = null;
+    }
+
+    readerRef.current = null;
+
+    onClose();
+  };
+
+  return (
+    <div className="space-y-4">
+
+      {/* CAMERA */}
+      <div
+        className="w-full overflow-hidden rounded-2xl bg-black"
+        style={{
+          minHeight: "420px",
+        }}
+      >
+        <video
+          ref={videoRef}
+          className="h-full w-full object-cover"
+          autoPlay
+          muted
+          playsInline
+        />
+      </div>
+
+      {/* STATUS */}
+      <div className="rounded-2xl bg-sky-50 px-5 py-4 text-center">
+
+        <div className="mb-2 text-2xl">
+          ⌗
+        </div>
+
+        <p className="font-semibold text-slate-800">
+          {status}
+        </p>
+
+        {cameraName && (
+          <p className="mt-1 text-xs text-slate-500">
+            Camera: {cameraName}
+          </p>
+        )}
+
+        <p className="mt-2 text-sm text-slate-500">
+          Keep the complete QR code visible
+          and hold the camera steady.
+        </p>
+
+      </div>
+
+      {/* IMAGE FALLBACK */}
+      <div className="space-y-3">
+
+        <p className="text-center text-sm text-slate-500">
+          Camera not detecting the QR?
+        </p>
+
+        <label className="block cursor-pointer rounded-full border border-slate-200 bg-white py-3 text-center font-semibold text-slate-700">
+
+          🖼️ Upload QR Image
+
+          <input
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleImageScan}
+          />
+
+        </label>
+
+      </div>
+
+      {/* CANCEL */}
+      <button
+        type="button"
+        onClick={handleClose}
+        className="w-full rounded-full border border-slate-200 bg-white py-3 font-semibold text-slate-700"
+      >
+        Cancel
+      </button>
+
+    </div>
+  );
+}
+
+function analyzeRealQr(decodedText: string) {
+  console.log("ANALYZING QR:", decodedText);
+
+  const result = {
+    raw: decodedText,
+    isUpi: false,
+    merchant: "",
+    upiId: "",
+    amount: null as number | null,
+    currency: "INR",
+    warnings: [] as string[],
+    risk: "LOW" as "LOW" | "MEDIUM" | "HIGH",
+  };
+
+  // Check whether this is a UPI payment URI
+  if (!decodedText.toLowerCase().startsWith("upi://pay")) {
+    result.warnings.push(
+      "This QR does not contain a standard UPI payment URI."
+    );
+
+    result.risk = "MEDIUM";
+
+    return result;
+  }
+
+  result.isUpi = true;
+
+  try {
+    const url = new URL(decodedText);
+
+    const pa = url.searchParams.get("pa");
+    const pn = url.searchParams.get("pn");
+    const am = url.searchParams.get("am");
+    const cu = url.searchParams.get("cu");
+
+    result.upiId = pa ?? "";
+    result.merchant = pn
+      ? decodeURIComponent(pn)
+      : "";
+    result.amount = am ? Number(am) : null;
+    result.currency = cu ?? "INR";
+
+    // Basic validation
+    if (!pa) {
+      result.warnings.push(
+        "The QR does not contain a UPI ID."
+      );
+      result.risk = "HIGH";
+    }
+
+    if (pa && !pa.includes("@")) {
+      result.warnings.push(
+        "The UPI ID format looks unusual."
+      );
+      result.risk = "MEDIUM";
+    }
+
+    if (result.amount !== null && result.amount <= 0) {
+      result.warnings.push(
+        "The payment amount is invalid."
+      );
+      result.risk = "HIGH";
+    }
+
+    if (result.amount !== null && result.amount > 10000) {
+      result.warnings.push(
+        "This QR requests a relatively large payment amount."
+      );
+
+      if (result.risk === "LOW") {
+        result.risk = "MEDIUM";
+      }
+    }
+
+    if (!pn) {
+      result.warnings.push(
+        "The QR does not provide a merchant name."
+      );
+
+      if (result.risk === "LOW") {
+        result.risk = "MEDIUM";
+      }
+    }
+
+    console.log("UPI QR ANALYSIS:", result);
+
+    return result;
+  } catch (error) {
+    console.error(
+      "UPI QR PARSE ERROR:",
+      error
+    );
+
+    result.warnings.push(
+      "The QR data could not be parsed safely."
+    );
+
+    result.risk = "HIGH";
+
+    return result;
+  }
+}
 
 function QrGuidance() {
   const readQr = useReadQr();
   const confirm = useConfirmPayment();
-  const [scanned, setScanned] = useState(false);
-  const [safety, setSafety] = useState<{ summary: string; checks: { name: string; passed: boolean; detail: string }[] } | null>(null);
+
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [analysis, setAnalysis] =
+  useState<ReturnType<typeof analyzeRealQr> | null>(null);
+  const [safety, setSafety] = useState<{
+    summary: string;
+    checks: { name: string; passed: boolean; detail: string }[];
+  } | null>(null);
   const [done, setDone] = useState(false);
-  const scan = () => { setScanned(true); readQr.mutate({ data: { merchant: sampleQrMerchant, amount: sampleQrAmount, source: 'sample' } }, { onSuccess: setSafety }); };
-  return <><PageIntro eyebrow="QR guidance" title="A QR code is just an address." description="Learn what to look for, then practice scanning a safe sample. We’ll always show you who and how much before a confirmation." /><div className="grid gap-6 lg:grid-cols-[.9fr_1.1fr]"><section className="app-card rounded-3xl p-6 md:p-8"><div className="flex items-center gap-3"><span className="grid h-11 w-11 place-items-center rounded-2xl bg-[hsl(var(--secondary))] text-[hsl(var(--primary))]"><QrCode /></span><div><h2 className="display-font text-2xl font-bold">Before you scan</h2><p className="text-sm text-[hsl(var(--muted-foreground))]">Three clues to pause for</p></div></div><div className="mt-8 space-y-5"><GuideNumber n="01" title="Find the name" detail="A real shop or person’s name should appear near the code." /><GuideNumber n="02" title="Ask what it is for" detail="Never scan a code sent by a stranger asking for an urgent refund." /><GuideNumber n="03" title="Check the amount" detail="Saathi will repeat the recipient and amount before you decide." /></div><Link href="/fraud-awareness" className="mt-8 inline-flex items-center gap-2 text-sm font-bold text-[hsl(var(--primary))]" data-testid="link-qr-fraud">Learn more about suspicious requests <ArrowRight size={15} /></Link></section><section className="app-card rounded-3xl p-6 md:p-8"><SimulatedNotice /><div className="mt-8 rounded-3xl border-2 border-dashed border-[hsl(var(--border))] bg-[hsl(var(--muted)/.42)] p-8 text-center"><div className="mx-auto h-44 w-44 overflow-hidden rounded-2xl border-8 border-[hsl(var(--primary))] bg-white p-3 text-[hsl(var(--foreground))]"><SampleUpiQr /></div><p className="sr-only">{sampleQrPayload}</p>{!scanned && <><h3 className="display-font mt-7 text-2xl font-bold">Ready to practice?</h3><p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[hsl(var(--muted-foreground))]">This sample belongs to {sampleQrMerchant}. Tap scan to see the safety steps.</p><button onClick={scan} disabled={readQr.isPending} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3 text-sm font-bold text-[hsl(var(--primary-foreground))] disabled:opacity-55" data-testid="button-scan-qr"><ScanLine size={17} /> {readQr.isPending ? 'Reading QR...' : 'Scan sample QR'}</button></>}{scanned && !done && <div className="mt-7 text-left"><p className="flex items-center gap-2 font-bold text-[hsl(153_42%_35%)]"><CheckCircle2 size={18} /> QR understood</p><div className="mt-4 rounded-2xl bg-[hsl(var(--secondary))] p-4"><div className="flex justify-between text-sm"><span className="text-[hsl(var(--muted-foreground))]">Paying</span><b>{sampleQrMerchant}</b></div><div className="mt-3 flex justify-between text-sm"><span className="text-[hsl(var(--muted-foreground))]">Practice amount</span><b>₹{sampleQrAmount}</b></div></div>{safety && <p className="mt-4 text-sm leading-6 text-[hsl(var(--muted-foreground))]">{safety.summary}</p>}<button onClick={() => confirm.mutate({ data: { recipient: sampleQrMerchant, amount: sampleQrAmount, source: 'qr' } }, { onSuccess: () => setDone(true) })} className="mt-5 w-full rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))]" data-testid="button-confirm-qr">Confirm practice step</button></div>}{done && <div className="mt-7"><CheckCircle2 className="mx-auto text-[hsl(153_42%_42%)]" size={35} /><h3 className="display-font mt-3 text-xl font-bold">Nicely checked.</h3><p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">You paused, looked, and confirmed. That is exactly the right rhythm.</p><button onClick={() => { setScanned(false); setDone(false); setSafety(null); }} className="mt-5 rounded-xl border border-[hsl(var(--border))] px-4 py-2.5 text-sm font-bold text-[hsl(var(--primary))]" data-testid="button-scan-another">Scan another sample</button></div>}</div></section></div></>;
+
+  const handleRealQrScan = (decodedText: string) => {
+    console.log('REAL QR DECODED:', decodedText);
+
+    setScannerOpen(false);
+    setDone(false);
+    setSafety(null);
+
+    const result = analyzeRealQr(decodedText);
+
+    setAnalysis(result);
+
+    /*
+     * Send the decoded recipient/amount to your existing backend
+     * safety-check endpoint when enough information is available.
+     */
+    if (result.isUpi && result.merchant && result.amount !== null) {
+      readQr.mutate(
+        {
+          data: {
+            merchant: result.merchant,
+            amount: result.amount,
+            source: 'qr',
+          },
+        },
+        {
+          onSuccess: setSafety,
+        },
+      );
+    }
+  };
+
+  const scanAgain = () => {
+    setAnalysis(null);
+    setSafety(null);
+    setDone(false);
+    setScannerOpen(true);
+  };
+
+  const riskClasses = {
+    LOW: {
+      box: 'border-[hsl(153_42%_42%/.3)] bg-[hsl(153_42%_42%/.08)]',
+      text: 'text-[hsl(153_42%_35%)]',
+      icon: CheckCircle2,
+    },
+    MEDIUM: {
+      box: 'border-[hsl(36_80%_54%/.35)] bg-[hsl(36_80%_54%/.1)]',
+      text: 'text-[hsl(36_70%_37%)]',
+      icon: ShieldQuestion,
+    },
+    HIGH: {
+      box: 'border-[hsl(var(--destructive)/.3)] bg-[hsl(var(--destructive)/.08)]',
+      text: 'text-[hsl(var(--destructive))]',
+      icon: Siren,
+    },
+  };
+
+  return (
+    <>
+      <PageIntro
+        eyebrow="QR guidance"
+        title="Check a QR before you pay."
+        description="Scan a real payment QR with your camera. Saathi reads the payment details and highlights structural warning signs before you continue."
+      />
+
+      <div className="grid gap-6 lg:grid-cols-[.9fr_1.1fr]">
+
+        {/* LEFT SIDE */}
+        <section className="app-card rounded-3xl p-6 md:p-8">
+          <div className="flex items-center gap-3">
+            <span className="grid h-11 w-11 place-items-center rounded-2xl bg-[hsl(var(--secondary))] text-[hsl(var(--primary))]">
+              <ShieldCheck />
+            </span>
+
+            <div>
+              <h2 className="display-font text-2xl font-bold">
+                Before you pay
+              </h2>
+
+              <p className="text-sm text-[hsl(var(--muted-foreground))]">
+                Three things to check
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-8 space-y-5">
+            <GuideNumber
+              n="01"
+              title="Check the recipient"
+              detail="Make sure the displayed name and UPI ID belong to the person or shop you intended to pay."
+            />
+
+            <GuideNumber
+              n="02"
+              title="Check the amount"
+              detail="Never confirm a payment until the amount shown by Saathi matches what you expect."
+            />
+
+            <GuideNumber
+              n="03"
+              title="Look at warnings"
+              detail="A QR can be technically valid but still belong to someone you do not intend to pay."
+            />
+          </div>
+
+          <Link
+            href="/fraud-awareness"
+            className="mt-8 inline-flex items-center gap-2 text-sm font-bold text-[hsl(var(--primary))]"
+            data-testid="link-qr-fraud"
+          >
+            Learn more about suspicious requests
+            <ArrowRight size={15} />
+          </Link>
+        </section>
+
+        {/* RIGHT SIDE */}
+        <section className="app-card rounded-3xl p-6 md:p-8">
+          <SimulatedNotice />
+
+          {!analysis && !scannerOpen && (
+            <div className="mt-8 rounded-3xl border-2 border-dashed border-[hsl(var(--border))] bg-[hsl(var(--muted)/.42)] p-8 text-center">
+
+              <div className="mx-auto grid h-44 w-44 place-items-center rounded-2xl border-8 border-[hsl(var(--primary))] bg-white">
+                <ScanLine
+                  size={90}
+                  strokeWidth={1.5}
+                  className="text-[hsl(var(--primary))]"
+                />
+              </div>
+
+              <h3 className="display-font mt-7 text-2xl font-bold">
+                Ready to scan?
+              </h3>
+
+              <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[hsl(var(--muted-foreground))]">
+                Point your camera at any UPI QR code. Saathi will decode it
+                and show you the payment details.
+              </p>
+
+              <button
+                onClick={() => setScannerOpen(true)}
+                className="mt-6 inline-flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3 text-sm font-bold text-[hsl(var(--primary-foreground))]"
+                data-testid="button-scan-qr"
+              >
+                <ScanLine size={17} />
+                Scan real QR
+              </button>
+            </div>
+          )}
+
+          {scannerOpen && (
+            <RealQrScanner
+              onScan={handleRealQrScan}
+              onClose={() => setScannerOpen(false)}
+            />
+          )}
+
+          {analysis && !done && (
+            <div className="mt-8 space-y-5">
+
+              {/* Risk result */}
+              <div
+                className={`rounded-2xl border p-5 ${
+                  riskClasses[analysis.risk].box
+                }`}
+              >
+                <div
+                  className={`flex items-center gap-2 font-bold ${
+                    riskClasses[analysis.risk].text
+                  }`}
+                >
+                  {(() => {
+                    const Icon = riskClasses[analysis.risk].icon;
+                    return <Icon size={21} />;
+                  })()}
+
+                  {analysis.risk === 'LOW' &&
+                    'No obvious structural warning'}
+
+                  {analysis.risk === 'MEDIUM' &&
+                    'Review this QR carefully'}
+
+                  {analysis.risk === 'HIGH' &&
+                    'High-risk QR structure detected'}
+                </div>
+
+                <p
+                  className={`mt-2 text-sm ${
+                    riskClasses[analysis.risk].text
+                  }`}
+                >
+                  Risk score: {analysis.risk}/100
+                </p>
+              </div>
+
+              {/* Payment details */}
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--muted-foreground))]">
+                  Payment details
+                </p>
+
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <Entity
+                    label="Recipient"
+                    value={analysis.merchant || 'Not provided'}
+                  />
+
+                  <Entity
+                    label="UPI ID"
+                    value={analysis.upiId || 'Not found'}
+                  />
+
+                  <Entity
+                    label="Amount"
+                    value={
+                      analysis.amount !== null
+                        ? `₹${analysis.amount.toLocaleString('en-IN')}`
+                        : 'Not specified'
+                    }
+                  />
+
+                  <Entity
+                    label="Currency"
+                    value={analysis.currency}
+                  />
+                </div>
+              </div>
+
+              {/* Warnings */}
+              <div className="rounded-2xl bg-[hsl(var(--secondary))] p-5">
+                <p className="font-bold">
+                  Saathi's checks
+                </p>
+
+                <div className="mt-3 space-y-3">
+                  {analysis.warnings.map((warning, index) => (
+                    <div
+                      key={`${warning}-${index}`}
+                      className="flex gap-2 text-sm leading-6"
+                    >
+                      <CircleAlert
+                        size={17}
+                        className="mt-1 shrink-0 text-[hsl(36_70%_37%)]"
+                      />
+
+                      <span>{warning}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Existing backend safety result */}
+              {readQr.isPending && (
+                <p className="text-sm font-semibold text-[hsl(var(--muted-foreground))]">
+                  Checking recipient safety…
+                </p>
+              )}
+
+              {safety && (
+                <div className="rounded-2xl border border-[hsl(var(--border))] p-5">
+                  <p className="font-bold">
+                    Safety check
+                  </p>
+
+                  <p className="mt-2 text-sm leading-6 text-[hsl(var(--muted-foreground))]">
+                    {safety.summary}
+                  </p>
+
+                  <div className="mt-4 space-y-2">
+                    {safety.checks.map((check) => (
+                      <div
+                        key={check.name}
+                        className="flex gap-2 text-sm"
+                      >
+                        {check.passed ? (
+                          <CheckCircle2
+                            size={16}
+                            className="mt-0.5 shrink-0 text-[hsl(153_42%_42%)]"
+                          />
+                        ) : (
+                          <CircleAlert
+                            size={16}
+                            className="mt-0.5 shrink-0 text-[hsl(36_70%_37%)]"
+                          />
+                        )}
+
+                        <span>
+                          <b>{check.name}:</b> {check.detail}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Action buttons */}
+              <div className="grid gap-3 sm:grid-cols-2">
+                <button
+                  onClick={scanAgain}
+                  className="rounded-xl border border-[hsl(var(--border))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary))]"
+                  data-testid="button-scan-another"
+                >
+                  Scan another QR
+                </button>
+
+                {analysis.isUpi &&
+                  analysis.merchant &&
+                  analysis.amount !== null && (
+                    <button
+                      onClick={() =>
+                        confirm.mutate(
+                          {
+                            data: {
+                              recipient: analysis.merchant,
+                              amount: analysis.amount!,
+                              source: 'qr',
+                            },
+                          },
+                          {
+                            onSuccess: () => setDone(true),
+                          },
+                        )
+                      }
+                      disabled={confirm.isPending}
+                      className="rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))] disabled:opacity-60"
+                      data-testid="button-confirm-qr"
+                    >
+                      {confirm.isPending
+                        ? 'Saving practice result…'
+                        : 'Confirm practice step'}
+                    </button>
+                  )}
+              </div>
+
+              <p className="text-xs leading-5 text-[hsl(var(--muted-foreground))]">
+                These checks identify QR/payment data that deserves attention.
+                They do not prove that a recipient is legitimate or fraudulent.
+                Always verify the recipient before paying.
+              </p>
+            </div>
+          )}
+
+          {done && (
+            <div className="mt-8 flex min-h-[320px] flex-col items-center justify-center text-center">
+              <CheckCircle2
+                className="text-[hsl(153_42%_42%)]"
+                size={42}
+              />
+
+              <h3 className="display-font mt-4 text-2xl font-bold">
+                QR checked successfully
+              </h3>
+
+              <p className="mt-2 max-w-sm text-sm leading-6 text-[hsl(var(--muted-foreground))]">
+                You checked the recipient and amount before continuing.
+              </p>
+
+              <button
+                onClick={scanAgain}
+                className="mt-6 rounded-xl bg-[hsl(var(--primary))] px-5 py-3 text-sm font-bold text-[hsl(var(--primary-foreground))]"
+              >
+                Scan another QR
+              </button>
+            </div>
+          )}
+        </section>
+      </div>
+    </>
+  );
 }
 
 function GuideNumber({ n, title, detail }: { n: string; title: string; detail: string }) {
