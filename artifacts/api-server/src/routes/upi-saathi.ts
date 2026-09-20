@@ -93,9 +93,19 @@ async function seedIfEmpty() {
 function parseIntent(text: string) {
   const normalized = text.toLowerCase();
   const amountMatch = normalized.match(/(?:₹|rs\.?|rupees?|inr)?\s*([0-9][0-9,]*)/i);
-  const amount = amountMatch ? Number(amountMatch[1].replaceAll(",", "")) : 500;
-  const knownNames = ["mom", "maa", "mother", "rahul", "dad", "father", "sister", "brother"];
-  const recipient = knownNames.find((name) => normalized.includes(name)) ?? "Mom";
+  const amount = amountMatch ? Number(amountMatch[1].replaceAll(",", "")) : null;
+  const knownNames: Record<string, string> = {
+    mom: "Mom",
+    maa: "Maa",
+    mother: "Mother",
+    meera: "Meera",
+    rahul: "Rahul",
+    dad: "Dad",
+    father: "Father",
+    sister: "Sister",
+    brother: "Brother",
+  };
+  const recipient = Object.entries(knownNames).find(([name]) => normalized.includes(name))?.[1];
   if (normalized.includes("scan") || normalized.includes("qr")) {
     return {
       transcript: text,
@@ -114,7 +124,7 @@ function parseIntent(text: string) {
       response: "I can help you spot common payment scams and decide what to do next.",
     };
   }
-  if (normalized.includes("cancel")) {
+if (normalized.includes("cancel")) {
     return {
       transcript: text,
       intent: "CANCEL_PAYMENT",
@@ -123,19 +133,38 @@ function parseIntent(text: string) {
       response: "No problem. We will not create a simulated transaction.",
     };
   }
+  if (normalized.includes("recharge")) {
+    const rechargeAmount = amountMatch ? Number(amountMatch[1].replaceAll(",", "")) : 199;
+    return {
+      transcript: text,
+      intent: "MOBILE_RECHARGE",
+      confidence: 0.97,
+      entities: { recipient: "Mobile Recharge", amount: rechargeAmount, currency: "INR" },
+      response: `You want to recharge your mobile phone with ₹${rechargeAmount.toLocaleString("en-IN")}. Please confirm the details.`,
+    };
+  }
+  const transferRecipient = recipient ?? "";
+  const transferAmount = amount ?? 0;
+  const hasTransferDetails = Boolean(recipient && amount);
   return {
     transcript: text,
-    intent: "SEND_MONEY",
-    confidence: 0.96,
-    entities: { recipient: recipient[0].toUpperCase() + recipient.slice(1), amount, currency: "INR" },
-    response: `You want to send ₹${amount.toLocaleString("en-IN")} to ${recipient[0].toUpperCase() + recipient.slice(1)}. Please confirm the details.`,
+    intent: hasTransferDetails ? "SEND_MONEY" : "NEEDS_DETAILS",
+    confidence: hasTransferDetails ? 0.96 : 0.72,
+    entities: { recipient: transferRecipient, amount: transferAmount, currency: "INR" },
+    response: recipient && amount
+      ? `You want to send ₹${transferAmount.toLocaleString("en-IN")} to ${transferRecipient}. Please confirm the details.`
+      : recipient
+        ? `I heard ${transferRecipient}, but I still need the amount before this can become a practice payment.`
+        : amount
+          ? `I found an amount of ₹${transferAmount.toLocaleString("en-IN")}, but I could not identify the recipient. Please review before continuing.`
+          : "I still need the recipient and amount before this can become a practice payment.",
   };
 }
 
 function buildSafety(recipient: string, amount: number) {
   const warnings: string[] = [];
   if (amount > 10000) warnings.push("This is a high-value payment. Take a moment to verify the amount.");
-  if (!["Mom", "Maa", "Mother", "Rahul", "Dad", "Father", "Sister", "Brother"].includes(recipient)) {
+  if (!["Mom", "Maa", "Mother", "Meera", "Rahul", "Dad", "Father", "Sister", "Brother", "Mobile Recharge"].includes(recipient)) {
     warnings.push("This recipient is not in your familiar demo contacts.");
   }
   if (/collect|request|receive/i.test(recipient)) {

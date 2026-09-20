@@ -1,9 +1,4 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import {
   Activity,
@@ -49,10 +44,6 @@ import {
   X,
 } from 'lucide-react';
 import {
-  BrowserQRCodeReader,
-  BrowserCodeReader,
-} from "@zxing/browser";
-import {
   getGetAnalyticsQueryKey,
   getGetAssistantHistoryQueryKey,
   getGetDashboardQueryKey,
@@ -88,6 +79,7 @@ import {
   type Payment,
   type Settings,
   setBaseUrl,
+  setAuthTokenGetter,
 } from '@workspace/api-client-react';
 import { Link, Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
 import { ErrorBoundary } from '@/components/error-boundary';
@@ -97,6 +89,94 @@ import NotFound from '@/pages/not-found';
 import '@/index.css';
 
 setBaseUrl(import.meta.env.VITE_API_URL ?? null);
+setAuthTokenGetter(() => localStorage.getItem('upisaathi_access_token') ?? localStorage.getItem('upisaathi_token'));
+
+type AuthUser = { id: number; name: string; email: string; role?: string; phone?: string | null; photo_url?: string | null; preferred_language?: string };
+type ManagedSettings = Settings & { screenReader?: boolean; literacyMode?: boolean };
+type NotificationPrefs = { sms: boolean; whatsapp: boolean; voice: boolean; email: boolean; emergencyPaymentNotifications: boolean };
+type VoicePrefs = { language: string; speed: number; gender: string; volume: number };
+type TrustedContact = { id: number; name: string; phone: string; relationship?: string | null; notifyOnEmergencyPayment: boolean };
+type AuthPayload = { accessToken?: string; refreshToken?: string; token?: string; user?: AuthUser };
+
+function getStoredUser(): AuthUser | null {
+  try {
+    const raw = localStorage.getItem('upisaathi_user');
+    return raw ? JSON.parse(raw) as AuthUser : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeAuth(data: AuthPayload) {
+  const access = data.accessToken ?? data.token;
+  if (access) {
+    localStorage.setItem('upisaathi_access_token', access);
+    localStorage.setItem('upisaathi_token', access);
+  }
+  if (data.refreshToken) localStorage.setItem('upisaathi_refresh_token', data.refreshToken);
+  if (data.user) localStorage.setItem('upisaathi_user', JSON.stringify(data.user));
+  setAuthTokenGetter(() => localStorage.getItem('upisaathi_access_token') ?? localStorage.getItem('upisaathi_token'));
+}
+
+async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const token = localStorage.getItem('upisaathi_access_token') ?? localStorage.getItem('upisaathi_token');
+  const headers = new Headers(init.headers);
+  if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
+  if (token && !headers.has('authorization')) headers.set('authorization', `Bearer ${token}`);
+  const res = await fetch(path, { ...init, headers });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.detail ?? `Request failed (${res.status})`);
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json() as Promise<T>;
+}
+
+async function refreshSession() {
+  const refreshToken = localStorage.getItem('upisaathi_refresh_token');
+  if (!refreshToken) return null;
+  const data = await apiJson<AuthPayload>('/api/auth/refresh', { method: 'POST', body: JSON.stringify({ refreshToken }) });
+  storeAuth(data);
+  return data.user ?? null;
+}
+
+async function handleAuthSubmit(type: 'login' | 'signup' | 'forgot', setLocation: (to: string) => void, form: HTMLFormElement) {
+  const primary = form.querySelector<HTMLInputElement>('#auth-name')?.value ?? '';
+  const password = form.querySelector<HTMLInputElement>('#auth-password')?.value ?? '';
+  if (type === 'forgot') {
+    setLocation('/login');
+    return;
+  }
+  try {
+    let auth: AuthPayload | null = null;
+    if (type === 'signup') {
+      const isEmail = primary.includes('@');
+      const email = isEmail ? primary : `${primary.trim().replace(/\s+/g, '.').toLowerCase() || 'learner'}@upisaathi.user`;
+      const name = isEmail ? primary.split('@')[0].trim() : primary.trim();
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name, email, password }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail ?? 'Sign up failed');
+      auth = data;
+    } else {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: primary, password }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail ?? 'Sign in failed');
+      auth = data;
+    }
+    if (auth) storeAuth(auth);
+    setLocation('/dashboard');
+  } catch (err) {
+    window.alert(err instanceof Error ? err.message : 'Something went wrong');
+  }
+}
 
 const queryClient = new QueryClient();
 
@@ -186,16 +266,42 @@ function speakText(text: string, language: SpeechLanguage = 'en') {
   speakLocalized(text, language);
 }
 
-function speakLocalized(text: string, language: string) {
+function speakLocalized(text: string, language: string, rate = 1) {
   if (!('speechSynthesis' in window)) return;
-  const utterance = new SpeechSynthesisUtterance(text);
+
   const preferredLanguage = speechLang[language as SpeechLanguage] ?? 'hi-IN';
-  utterance.lang = preferredLanguage;
   const voices = window.speechSynthesis.getVoices();
-  const voice = voices.find((item) => item.lang === preferredLanguage) ?? voices.find((item) => item.lang.startsWith(language)) ?? voices.find((item) => item.lang.startsWith('hi'));
-  if (voice) utterance.voice = voice;
+
+  if (voices.length === 0) {
+    const retry = () => {
+      window.speechSynthesis.removeEventListener('voiceschanged', retry);
+      speakLocalized(text, language, rate);
+    };
+    window.speechSynthesis.addEventListener('voiceschanged', retry);
+    return;
+  }
+
+  const voice =
+    voices.find((item) => item.lang === preferredLanguage) ??
+    voices.find((item) => item.lang.startsWith(language)) ??
+    voices.find((item) => item.lang.startsWith('hi'));
+
+  if (!voice) {
+    playOnlineVoice(text, preferredLanguage);
+    return;
+  }
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = preferredLanguage;
+  utterance.voice = voice;
+  utterance.rate = rate;
   window.speechSynthesis.cancel();
   window.speechSynthesis.speak(utterance);
+}
+
+function playOnlineVoice(text: string, locale: string) {
+  const audio = new Audio(`https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${encodeURIComponent(locale)}&q=${encodeURIComponent(text)}`);
+  audio.play();
 }
 
 function speakWhenReady(text: string, language: SpeechLanguage = 'en') {
@@ -205,6 +311,16 @@ function speakWhenReady(text: string, language: SpeechLanguage = 'en') {
     return;
   }
   window.speechSynthesis.onvoiceschanged = () => speakText(text, language);
+}
+
+function useAnnounce() {
+  const { data } = useGetSettings();
+  const settings = data ?? fallbackSettings;
+  const announce = (text: string) => {
+    if (!settings.voiceGuidance) return;
+    speakLocalized(text, settings.language, settings.speechSpeed ?? 1);
+  };
+  return announce;
 }
 
 function BrandMark({ compact = false }: { compact?: boolean }) {
@@ -221,13 +337,27 @@ function BrandMark({ compact = false }: { compact?: boolean }) {
 }
 
 function AppShell({ children }: { children: ReactNode }) {
-  const [location] = useLocation();
+  const [location, setLocation] = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(() => getStoredUser());
   const { data: apiSettings } = useGetSettings();
   const { data: notifications } = useGetNotifications();
   const settings = apiSettings ?? fallbackSettings;
   const largeText = settings.largeText;
   const unreadNotifications = getNotificationList(notifications).filter((notification) => !notification.read).length;
+  useEffect(() => { if (!authUser) void refreshSession().then((user) => { if (user) setAuthUser(user); }).catch(() => undefined); }, []);
+  const logout = async () => {
+    const refreshToken = localStorage.getItem('upisaathi_refresh_token');
+    await apiJson<void>('/api/auth/logout', { method: 'POST', body: JSON.stringify({ refreshToken }) }).catch(() => undefined);
+    localStorage.removeItem('upisaathi_access_token');
+    localStorage.removeItem('upisaathi_token');
+    localStorage.removeItem('upisaathi_refresh_token');
+    localStorage.removeItem('upisaathi_user');
+    setAuthTokenGetter(() => null);
+    setAuthUser(null);
+    queryClient.clear();
+    setLocation('/login');
+  };
 
   return (
     <div className={`noise saathi-shell flex min-h-[100dvh] ${largeText ? 'text-[17px]' : ''}`}>
@@ -269,7 +399,8 @@ function AppShell({ children }: { children: ReactNode }) {
           <div className="flex items-center gap-2.5">
             <Link href="/accessibility" className="hidden items-center gap-2 rounded-full border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-2 text-xs font-bold text-[hsl(var(--primary))] sm:flex" data-testid="link-accessibility-quick"><Contrast size={15} /> Make it easier</Link>
             <Link href="/notifications" className="relative grid h-10 w-10 place-items-center rounded-full border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--primary))]" aria-label={`${unreadNotifications} unread notifications`} data-testid="link-notifications"><Bell size={17} />{unreadNotifications > 0 && <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-[hsl(var(--accent))] px-1 text-[9px] font-extrabold text-[hsl(var(--accent-foreground))]">{unreadNotifications}</span>}</Link>
-            <Link href="/settings" className="grid h-10 w-10 place-items-center rounded-full bg-[hsl(var(--primary))] text-sm font-bold text-[hsl(var(--primary-foreground))]" data-testid="link-profile-settings">AS</Link>
+            <button onClick={logout} className="hidden rounded-full border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-2 text-xs font-bold text-[hsl(var(--primary))] sm:block" data-testid="button-logout">{authUser ? 'Logout' : 'Guest'}</button>
+            <Link href="/settings" className="grid h-10 w-10 place-items-center rounded-full bg-[hsl(var(--primary))] text-sm font-bold text-[hsl(var(--primary-foreground))]" data-testid="link-profile-settings">{(authUser?.name ?? settings.profileName ?? 'AS').slice(0, 2).toUpperCase()}</Link>
           </div>
         </header>
         <div className="mx-auto w-full max-w-[1440px] px-5 py-8 lg:px-10 lg:py-10">{children}</div>
@@ -336,7 +467,8 @@ function VoicePayment() {
   const guide = useGuidePayment();
   const confirm = useConfirmPayment();
   const client = useQueryClient();
-  const [phrase, setPhrase] = useState('Send ₹500 to Mom');
+  const announce = useAnnounce();
+  const [phrase, setPhrase] = useState('Recharge my phone');
   const [result, setResult] = useState<{ transcript: string; intent: string; confidence: number; entities: { recipient: string; amount: number; currency: string }; response: string } | null>(null);
   const [safety, setSafety] = useState<{ safe: boolean; warnings: string[]; checks: { name: string; passed: boolean; detail: string }[]; summary: string } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -344,18 +476,14 @@ function VoicePayment() {
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState('');
   const busy = transcribe.isPending || detect.isPending || guide.isPending;
-  const speak = (text: string) => {
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
-    }
-  };
+  useEffect(() => { announce('Voice payment. Tap the round microphone button, or type a phrase like "Recharge my phone" and press Try it. Saathi will repeat what it heard before you confirm. This is a simulated practice payment only.'); }, []);
   const runPhrase = (text: string) => {
     setError(''); setConfirmed(false); setSafety(null);
-    transcribe.mutate({ data: { transcript: text } }, { onSuccess: (voiceResult) => { setResult(voiceResult); detect.mutate({ data: { text: voiceResult.transcript, language: 'en' } }, { onSuccess: setResult }); }, onError: () => setError('The demo phrase could not be understood. Try the example once more.') });
+    transcribe.mutate({ data: { transcript: text } }, { onSuccess: (voiceResult) => { setResult(voiceResult); announce(`I heard: ${voiceResult.transcript}. ${voiceResult.response} Press the button that says Check these details.`); detect.mutate({ data: { text: voiceResult.transcript, language: 'en' } }, { onSuccess: setResult }); }, onError: () => setError('The demo phrase could not be understood. Try the example once more.') });
   };
   const startListening = () => {
     setIsListening(true);
+    announce('I am listening. Please speak the payment phrase clearly, for example, recharge my phone.');
     const SpeechRecognitionApi = (window as Window & { SpeechRecognition?: new () => { lang: string; start: () => void; onresult: ((event: { results: { [key: number]: { [key: number]: { transcript: string } } } }) => void) | null; onend: (() => void) | null; onerror: (() => void) | null } }).SpeechRecognition;
     if (SpeechRecognitionApi) {
       const recognition = new SpeechRecognitionApi();
@@ -368,9 +496,9 @@ function VoicePayment() {
       window.setTimeout(() => { setIsListening(false); runPhrase(phrase); }, 700);
     }
   };
-  const guideIt = () => { if (!result) return; guide.mutate({ data: { recipient: result.entities.recipient, amount: result.entities.amount, source: 'voice' } }, { onSuccess: setSafety, onError: () => setError('We could not complete the safety check.') }); };
-  const confirmIt = () => { if (!result) return; confirm.mutate({ data: { recipient: result.entities.recipient, amount: result.entities.amount, source: 'voice' } }, { onSuccess: (saved) => { setPayment(saved); setConfirmed(true); speak(`Your simulated payment of ${result.entities.amount} rupees to ${result.entities.recipient} has been completed successfully.`); client.invalidateQueries({ queryKey: getGetDashboardQueryKey() }); client.invalidateQueries({ queryKey: getGetHistoryQueryKey() }); client.invalidateQueries({ queryKey: getGetNotificationsQueryKey() }); } }); };
-  return <><PageIntro eyebrow="Voice payment" title="Say what you need. We’ll slow it down." description="Try a natural phrase. Saathi will repeat the important parts, check them, and wait for your say-so." /><div className="grid gap-6 lg:grid-cols-[.85fr_1.15fr]"><section className="app-card rounded-3xl p-6 md:p-8"><SimulatedNotice /><div className="mt-10 text-center"><button onClick={startListening} className={`pulse-ring mx-auto grid h-36 w-36 place-items-center rounded-full bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] transition-transform hover:scale-[1.03] ${isListening ? 'bg-[hsl(var(--accent))] text-[hsl(var(--accent-foreground))]' : ''}`} aria-label="Start listening" data-testid="button-start-listening">{isListening ? <Volume2 size={43} /> : <Mic size={43} />}</button><p className="mt-7 text-sm font-bold text-[hsl(var(--primary))]">{isListening ? 'I am listening…' : 'Tap to try the voice demo'}</p><p className="mx-auto mt-2 max-w-xs text-sm leading-6 text-[hsl(var(--muted-foreground))]">You can also type the sentence below. Both ways use the same safe practice flow.</p></div><label className="mt-9 block text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--muted-foreground))]" htmlFor="voice-phrase">Your phrase</label><div className="mt-2 flex gap-2"><input id="voice-phrase" value={phrase} onChange={(event) => setPhrase(event.target.value)} className="min-w-0 flex-1 rounded-xl border border-[hsl(var(--input))] bg-[hsl(var(--card))] px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]" data-testid="input-voice-phrase" /><button onClick={() => runPhrase(phrase)} className="rounded-xl bg-[hsl(var(--secondary))] px-4 text-sm font-bold text-[hsl(var(--primary))]" data-testid="button-submit-voice">Try it</button></div><div className="mt-4 flex flex-wrap gap-2">{['Send ₹500 to Mom', 'Pay Meera ₹245', 'Recharge my phone'].map((sample) => <button key={sample} onClick={() => { setPhrase(sample); runPhrase(sample); }} className="rounded-full border border-[hsl(var(--border))] px-3 py-1.5 text-xs font-semibold text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary))] hover:text-[hsl(var(--primary))]" data-testid={`button-sample-${sample.replaceAll(' ', '-').replace('₹', 'rs')}`}>{sample}</button>)}</div>{error && <p className="mt-4 rounded-xl bg-[hsl(var(--destructive)/.09)] p-3 text-sm font-semibold text-[hsl(var(--destructive))]" data-testid="status-voice-error">{error}</p>}</section><section className="app-card rounded-3xl p-6 md:p-8"><div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-[hsl(var(--muted-foreground))]">Your guided preview</p><h2 className="display-font mt-2 text-2xl font-bold">Nothing happens without you</h2></div><span className="rounded-full bg-[hsl(var(--secondary))] px-3 py-1.5 text-xs font-bold text-[hsl(var(--primary))]">{confirmed ? 'Complete' : safety ? 'Ready to review' : result ? 'Understood' : 'Waiting'}</span></div>{busy && <div className="mt-8 space-y-3"><Skeleton className="h-16" /><Skeleton className="h-24" /></div>}{!busy && !result && !confirmed && <EmptyState title="Your words will appear here" detail="Tap the microphone or try the example phrase. Saathi will show you every important detail." />}{result && !confirmed && <div className="mt-8 space-y-5"><div className="rounded-2xl bg-[hsl(var(--secondary))] p-5"><p className="text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--primary))]">I heard</p><p className="mt-2 text-lg font-bold">“{result.transcript}”</p><p className="mt-3 text-sm leading-6 text-[hsl(var(--muted-foreground))]">{result.response}</p></div><div className="grid gap-3 sm:grid-cols-3"><Entity label="To" value={result.entities.recipient} /><Entity label="Amount" value={`₹${result.entities.amount}`} /><Entity label="Confidence" value={`${Math.round(result.confidence * 100)}%`} /></div>{!safety ? <button onClick={guideIt} disabled={guide.isPending} className="flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))] disabled:opacity-60" data-testid="button-run-safety">{guide.isPending ? 'Checking…' : 'Check these details' } <ArrowRight size={16} /></button> : <div className={`rounded-2xl border p-5 ${safety.safe ? 'border-[hsl(153_42%_42%/.25)] bg-[hsl(153_42%_42%/.08)]' : 'border-[hsl(36_80%_54%/.35)] bg-[hsl(36_80%_54%/.1)]'}`}><div className={`flex items-center gap-2 font-bold ${safety.safe ? 'text-[hsl(153_42%_35%)]' : 'text-[hsl(36_70%_37%)]'}`}>{safety.safe ? <CheckCircle2 size={19} /> : <ShieldQuestion size={19} />} {safety.safe ? safety.summary : 'Safety alert — review before continuing'}</div>{safety.warnings.length > 0 && <div className="mt-3 rounded-xl bg-[hsl(36_80%_54%/.15)] p-3 text-sm font-semibold text-[hsl(36_70%_37%)]">{safety.warnings.join(' ')}</div>}<div className="mt-4 space-y-2">{safety.checks.map((check) => <div key={check.name} className="flex gap-2 text-sm"><Check size={15} className={`mt-0.5 ${check.passed ? 'text-[hsl(153_42%_42%)]' : 'text-[hsl(36_70%_37%)]'}`} /><span><b>{check.name}:</b> {check.detail}</span></div>)}</div><button onClick={confirmIt} disabled={confirm.isPending} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))] disabled:opacity-60" data-testid="button-confirm-payment">{confirm.isPending ? 'Saving practice result…' : 'Confirm practice payment'} <Check size={16} /></button></div>}</div>}{confirmed && <div className="flex min-h-[320px] flex-col items-center justify-center text-center"><span className="grid h-16 w-16 place-items-center rounded-full bg-[hsl(153_42%_42%/.12)] text-[hsl(153_42%_35%)]"><CheckCircle2 size={32} /></span><h3 className="display-font mt-5 text-2xl font-bold">Practice payment complete</h3><p className="mt-2 max-w-sm text-sm leading-6 text-[hsl(var(--muted-foreground))]">You checked the recipient and amount before confirming. That is the habit that keeps payments safer.</p><Link href="/dashboard" className="mt-6 rounded-xl bg-[hsl(var(--primary))] px-5 py-3 text-sm font-bold text-[hsl(var(--primary-foreground))]" data-testid="link-back-dashboard">Back to my day</Link></div>}</section></div></>;
+  const guideIt = () => { if (!result) return; guide.mutate({ data: { recipient: result.entities.recipient, amount: result.entities.amount, source: 'voice' } }, { onSuccess: (safetyResult) => { setSafety(safetyResult); announce(`${safetyResult.safe ? 'The details look safe. ' : 'Attention. Saathi found something to review. '}${safetyResult.summary}${safetyResult.warnings.length ? ' Warnings: ' + safetyResult.warnings.join('. ') + '.' : ''} Press the button that says Confirm practice payment, or go back if anything feels wrong.`); }, onError: () => setError('We could not complete the safety check.') }); };
+  const confirmIt = () => { if (!result) return; confirm.mutate({ data: { recipient: result.entities.recipient, amount: result.entities.amount, source: 'voice' } }, { onSuccess: (saved) => { setPayment(saved); setConfirmed(true); announce(`Payment complete. Your simulated payment of ${result.entities.amount} rupees to ${result.entities.recipient} has been saved. You checked the recipient and amount before confirming. That is the habit that keeps payments safer.`); client.invalidateQueries({ queryKey: getGetDashboardQueryKey() }); client.invalidateQueries({ queryKey: getGetHistoryQueryKey() }); client.invalidateQueries({ queryKey: getGetNotificationsQueryKey() }); } }); };
+  return <><PageIntro eyebrow="Voice payment" title="Say what you need. We’ll slow it down." description="Try a natural phrase. Saathi will repeat the important parts, check them, and wait for your say-so." /><div className="grid gap-6 lg:grid-cols-[.85fr_1.15fr]"><section className="app-card rounded-3xl p-6 md:p-8"><SimulatedNotice /><div className="mt-10 text-center"><button onClick={startListening} className={`pulse-ring mx-auto grid h-36 w-36 place-items-center rounded-full bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] transition-transform hover:scale-[1.03] ${isListening ? 'bg-[hsl(var(--accent))] text-[hsl(var(--accent-foreground))]' : ''}`} aria-label="Start listening" data-testid="button-start-listening">{isListening ? <Volume2 size={43} /> : <Mic size={43} />}</button><p className="mt-7 text-sm font-bold text-[hsl(var(--primary))]">{isListening ? 'I am listening…' : 'Tap to try the voice demo'}</p><p className="mx-auto mt-2 max-w-xs text-sm leading-6 text-[hsl(var(--muted-foreground))]">You can also type the sentence below. Both ways use the same safe practice flow.</p></div><label className="mt-9 block text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--muted-foreground))]" htmlFor="voice-phrase">Your phrase</label><div className="mt-2 flex gap-2"><input id="voice-phrase" value={phrase} onChange={(event) => setPhrase(event.target.value)} className="min-w-0 flex-1 rounded-xl border border-[hsl(var(--input))] bg-[hsl(var(--card))] px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]" data-testid="input-voice-phrase" /><button onClick={() => runPhrase(phrase)} className="rounded-xl bg-[hsl(var(--secondary))] px-4 text-sm font-bold text-[hsl(var(--primary))]" data-testid="button-submit-voice">Try it</button></div><div className="mt-4 flex flex-wrap gap-2">{['Recharge my phone', 'Pay Meera ₹245', 'Pay Rahul ₹150'].map((sample) => <button key={sample} onClick={() => { setPhrase(sample); runPhrase(sample); }} className="rounded-full border border-[hsl(var(--border))] px-3 py-1.5 text-xs font-semibold text-[hsl(var(--muted-foreground))] hover:border-[hsl(var(--primary))] hover:text-[hsl(var(--primary))]" data-testid={`button-sample-${sample.replaceAll(' ', '-').replace('₹', 'rs')}`}>{sample}</button>)}</div>{error && <p className="mt-4 rounded-xl bg-[hsl(var(--destructive)/.09)] p-3 text-sm font-semibold text-[hsl(var(--destructive))]" data-testid="status-voice-error">{error}</p>}</section><section className="app-card rounded-3xl p-6 md:p-8"><div className="flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-[.16em] text-[hsl(var(--muted-foreground))]">Your guided preview</p><h2 className="display-font mt-2 text-2xl font-bold">Nothing happens without you</h2></div><span className="rounded-full bg-[hsl(var(--secondary))] px-3 py-1.5 text-xs font-bold text-[hsl(var(--primary))]">{confirmed ? 'Complete' : safety ? 'Ready to review' : result ? 'Understood' : 'Waiting'}</span></div>{busy && <div className="mt-8 space-y-3"><Skeleton className="h-16" /><Skeleton className="h-24" /></div>}{!busy && !result && !confirmed && <EmptyState title="Your words will appear here" detail="Tap the microphone or try the example phrase. Saathi will show you every important detail." />}{result && !confirmed && <div className="mt-8 space-y-5"><div className="rounded-2xl bg-[hsl(var(--secondary))] p-5"><p className="text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--primary))]">I heard</p><p className="mt-2 text-lg font-bold">“{result.transcript}”</p><p className="mt-3 text-sm leading-6 text-[hsl(var(--muted-foreground))]">{result.response}</p></div><div className="grid gap-3 sm:grid-cols-3"><Entity label="To" value={result.entities.recipient || 'Needed'} /><Entity label="Amount" value={result.entities.amount > 0 ? `₹${result.entities.amount}` : 'Needed'} /><Entity label="Confidence" value={`${Math.round(result.confidence * 100)}%`} /></div>{!safety ? <button onClick={guideIt} disabled={guide.isPending || result.entities.amount <= 0 || !result.entities.recipient} className="flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))] disabled:opacity-60" data-testid="button-run-safety">{guide.isPending ? 'Checking…' : 'Check these details' } <ArrowRight size={16} /></button> : <div className={`rounded-2xl border p-5 ${safety.safe ? 'border-[hsl(153_42%_42%/.25)] bg-[hsl(153_42%_42%/.08)]' : 'border-[hsl(36_80%_54%/.35)] bg-[hsl(36_80%_54%/.1)]'}`}><div className={`flex items-center gap-2 font-bold ${safety.safe ? 'text-[hsl(153_42%_35%)]' : 'text-[hsl(36_70%_37%)]'}`}>{safety.safe ? <CheckCircle2 size={19} /> : <ShieldQuestion size={19} />} {safety.safe ? safety.summary : 'Safety alert — review before continuing'}</div>{safety.warnings.length > 0 && <div className="mt-3 rounded-xl bg-[hsl(36_80%_54%/.15)] p-3 text-sm font-semibold text-[hsl(36_70%_37%)]">{safety.warnings.join(' ')}</div>}<div className="mt-4 space-y-2">{safety.checks.map((check) => <div key={check.name} className="flex gap-2 text-sm"><Check size={15} className={`mt-0.5 ${check.passed ? 'text-[hsl(153_42%_42%)]' : 'text-[hsl(36_70%_37%)]'}`} /><span><b>{check.name}:</b> {check.detail}</span></div>)}</div><button onClick={confirmIt} disabled={confirm.isPending} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))] disabled:opacity-60" data-testid="button-confirm-payment">{confirm.isPending ? 'Saving practice result…' : 'Confirm practice payment'} <Check size={16} /></button></div>}</div>}{confirmed && <div className="flex min-h-[320px] flex-col items-center justify-center text-center"><span className="grid h-16 w-16 place-items-center rounded-full bg-[hsl(153_42%_42%/.12)] text-[hsl(153_42%_35%)]"><CheckCircle2 size={32} /></span><h3 className="display-font mt-5 text-2xl font-bold">Practice payment complete</h3><p className="mt-2 max-w-sm text-sm leading-6 text-[hsl(var(--muted-foreground))]">You checked the recipient and amount before confirming. That is the habit that keeps payments safer.</p><Link href="/dashboard" className="mt-6 rounded-xl bg-[hsl(var(--primary))] px-5 py-3 text-sm font-bold text-[hsl(var(--primary-foreground))]" data-testid="link-back-dashboard">Back to my day</Link></div>}</section></div></>;
 }
 
 function Entity({ label, value }: { label: string; value: string }) {
@@ -453,808 +581,17 @@ function SampleUpiQr() {
     </svg>
   );
 }
-function RealQrScanner({
-  onScan,
-  onClose,
-}: {
-  onScan: (decodedText: string) => void;
-  onClose: () => void;
-}) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const controlsRef = useRef<{ stop: () => void } | null>(null);
-  const readerRef = useRef<BrowserQRCodeReader | null>(null);
-  const onScanRef = useRef(onScan);
-
-  const [status, setStatus] = useState("Starting camera...");
-  const [cameraName, setCameraName] = useState("");
-
-  useEffect(() => {
-    onScanRef.current = onScan;
-  }, [onScan]);
-
-  useEffect(() => {
-    let mounted = true;
-
-    const startScanner = async () => {
-      try {
-        setStatus("Finding camera...");
-
-        const devices =
-          await BrowserCodeReader.listVideoInputDevices();
-
-        console.log("AVAILABLE CAMERAS:", devices);
-
-        if (!devices.length) {
-          throw new Error("No camera found");
-        }
-
-        // Prefer a rear/environment camera when available.
-        const selectedCamera =
-          devices.find((device) =>
-            /back|rear|environment/i.test(device.label)
-          ) ?? devices[devices.length - 1];
-
-        console.log("USING CAMERA:", selectedCamera);
-
-        if (!mounted) return;
-
-        setCameraName(
-          selectedCamera.label || "Camera"
-        );
-
-        const reader = new BrowserQRCodeReader();
-
-        readerRef.current = reader;
-
-        setStatus("Point the camera at the QR code");
-
-        if (!videoRef.current) {
-          throw new Error("Video element not available");
-        }
-
-        const controls =
-          await reader.decodeFromVideoDevice(
-            selectedCamera.deviceId,
-            videoRef.current,
-            (result, error) => {
-              if (!mounted) return;
-
-              if (result) {
-                const decodedText =
-                  result.getText();
-
-                console.log(
-                  "================================="
-                );
-                console.log(
-                  "QR CODE DETECTED!"
-                );
-                console.log(
-                  "DECODED TEXT:",
-                  decodedText
-                );
-                console.log("DECODED TEXT LENGTH:", decodedText.length);
-console.log("DECODED TEXT JSON:", JSON.stringify(decodedText));
-console.log("IS UPI:", decodedText.toLowerCase().startsWith("upi://pay"));
-                console.log(
-                  "================================="
-                );
-
-                setStatus("QR code detected!");
-
-                controls.stop();
-                controlsRef.current = null;
-
-                onScanRef.current(
-                  decodedText
-                );
-
-                return;
-              }
-
-              // NotFoundException is normal
-              // while looking through frames.
-              if (error) {
-                console.debug(
-                  "QR frame not decoded:",
-                  error
-                );
-              }
-            }
-          );
-
-        controlsRef.current = controls;
-
-        console.log(
-          "ZXING QR CAMERA STARTED SUCCESSFULLY"
-        );
-      } catch (error) {
-        console.error(
-          "ZXING QR SCANNER ERROR:",
-          error
-        );
-
-        if (mounted) {
-          setStatus(
-            `Camera scanner error: ${
-              error instanceof Error
-                ? error.message
-                : String(error)
-            }`
-          );
-        }
-      }
-    };
-
-    startScanner();
-
-    return () => {
-      mounted = false;
-
-      if (controlsRef.current) {
-        try {
-          controlsRef.current.stop();
-        } catch (error) {
-          console.log(
-            "Scanner cleanup:",
-            error
-          );
-        }
-
-        controlsRef.current = null;
-      }
-
-      readerRef.current = null;
-    };
-  }, []);
-
-  const handleImageScan = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    const file = event.target.files?.[0];
-
-    if (!file) return;
-
-    try {
-      setStatus("Reading QR image...");
-
-      console.log(
-        "QR IMAGE SELECTED:",
-        file.name
-      );
-
-      const reader =
-        new BrowserQRCodeReader();
-
-      const imageUrl =
-        URL.createObjectURL(file);
-
-      try {
-        const result =
-          await reader.decodeFromImageUrl(
-            imageUrl
-          );
-
-        const decodedText =
-          result.getText();
-
-        console.log(
-          "================================="
-        );
-        console.log(
-          "QR IMAGE DETECTED!"
-        );
-        console.log(
-          "DECODED TEXT:",
-          decodedText
-        );
-        console.log(
-          "================================="
-        );
-
-        setStatus("QR code detected!");
-
-        onScanRef.current(
-          decodedText
-        );
-      } finally {
-        URL.revokeObjectURL(imageUrl);
-      }
-    } catch (error) {
-      console.error(
-        "QR IMAGE SCAN ERROR:",
-        error
-      );
-
-      setStatus(
-        "Could not read this QR image. Please upload a clearer image."
-      );
-    }
-
-    event.target.value = "";
-  };
-
-  const handleClose = () => {
-    if (controlsRef.current) {
-      try {
-        controlsRef.current.stop();
-      } catch (error) {
-        console.log(
-          "Scanner stop:",
-          error
-        );
-      }
-
-      controlsRef.current = null;
-    }
-
-    readerRef.current = null;
-
-    onClose();
-  };
-
-  return (
-    <div className="space-y-4">
-
-      {/* CAMERA */}
-      <div
-        className="w-full overflow-hidden rounded-2xl bg-black"
-        style={{
-          minHeight: "420px",
-        }}
-      >
-        <video
-          ref={videoRef}
-          className="h-full w-full object-cover"
-          autoPlay
-          muted
-          playsInline
-        />
-      </div>
-
-      {/* STATUS */}
-      <div className="rounded-2xl bg-sky-50 px-5 py-4 text-center">
-
-        <div className="mb-2 text-2xl">
-          ⌗
-        </div>
-
-        <p className="font-semibold text-slate-800">
-          {status}
-        </p>
-
-        {cameraName && (
-          <p className="mt-1 text-xs text-slate-500">
-            Camera: {cameraName}
-          </p>
-        )}
-
-        <p className="mt-2 text-sm text-slate-500">
-          Keep the complete QR code visible
-          and hold the camera steady.
-        </p>
-
-      </div>
-
-      {/* IMAGE FALLBACK */}
-      <div className="space-y-3">
-
-        <p className="text-center text-sm text-slate-500">
-          Camera not detecting the QR?
-        </p>
-
-        <label className="block cursor-pointer rounded-full border border-slate-200 bg-white py-3 text-center font-semibold text-slate-700">
-
-          🖼️ Upload QR Image
-
-          <input
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={handleImageScan}
-          />
-
-        </label>
-
-      </div>
-
-      {/* CANCEL */}
-      <button
-        type="button"
-        onClick={handleClose}
-        className="w-full rounded-full border border-slate-200 bg-white py-3 font-semibold text-slate-700"
-      >
-        Cancel
-      </button>
-
-    </div>
-  );
-}
-
-function analyzeRealQr(decodedText: string) {
-  console.log("ANALYZING QR:", decodedText);
-
-  const result = {
-    raw: decodedText,
-    isUpi: false,
-    merchant: "",
-    upiId: "",
-    amount: null as number | null,
-    currency: "INR",
-    warnings: [] as string[],
-    risk: "LOW" as "LOW" | "MEDIUM" | "HIGH",
-  };
-
-  // Check whether this is a UPI payment URI
-  if (!decodedText.toLowerCase().startsWith("upi://pay")) {
-    result.warnings.push(
-      "This QR does not contain a standard UPI payment URI."
-    );
-
-    result.risk = "MEDIUM";
-
-    return result;
-  }
-
-  result.isUpi = true;
-
-  try {
-    const url = new URL(decodedText);
-
-    const pa = url.searchParams.get("pa");
-    const pn = url.searchParams.get("pn");
-    const am = url.searchParams.get("am");
-    const cu = url.searchParams.get("cu");
-
-    result.upiId = pa ?? "";
-    result.merchant = pn
-      ? decodeURIComponent(pn)
-      : "";
-    result.amount = am ? Number(am) : null;
-    result.currency = cu ?? "INR";
-
-    // Basic validation
-    if (!pa) {
-      result.warnings.push(
-        "The QR does not contain a UPI ID."
-      );
-      result.risk = "HIGH";
-    }
-
-    if (pa && !pa.includes("@")) {
-      result.warnings.push(
-        "The UPI ID format looks unusual."
-      );
-      result.risk = "MEDIUM";
-    }
-
-    if (result.amount !== null && result.amount <= 0) {
-      result.warnings.push(
-        "The payment amount is invalid."
-      );
-      result.risk = "HIGH";
-    }
-
-    if (result.amount !== null && result.amount > 10000) {
-      result.warnings.push(
-        "This QR requests a relatively large payment amount."
-      );
-
-      if (result.risk === "LOW") {
-        result.risk = "MEDIUM";
-      }
-    }
-
-    if (!pn) {
-      result.warnings.push(
-        "The QR does not provide a merchant name."
-      );
-
-      if (result.risk === "LOW") {
-        result.risk = "MEDIUM";
-      }
-    }
-
-    console.log("UPI QR ANALYSIS:", result);
-
-    return result;
-  } catch (error) {
-    console.error(
-      "UPI QR PARSE ERROR:",
-      error
-    );
-
-    result.warnings.push(
-      "The QR data could not be parsed safely."
-    );
-
-    result.risk = "HIGH";
-
-    return result;
-  }
-}
 
 function QrGuidance() {
   const readQr = useReadQr();
   const confirm = useConfirmPayment();
-
-  const [scannerOpen, setScannerOpen] = useState(false);
-  const [analysis, setAnalysis] =
-  useState<ReturnType<typeof analyzeRealQr> | null>(null);
-  const [safety, setSafety] = useState<{
-    summary: string;
-    checks: { name: string; passed: boolean; detail: string }[];
-  } | null>(null);
+  const announce = useAnnounce();
+  useEffect(() => { announce(`QR guidance. The sample QR code on the right belongs to ${sampleQrMerchant} for ${sampleQrAmount} rupees. Press the button that says Scan sample QR to begin the safety steps.`); }, []);
+  const [scanned, setScanned] = useState(false);
+  const [safety, setSafety] = useState<{ summary: string; checks: { name: string; passed: boolean; detail: string }[] } | null>(null);
   const [done, setDone] = useState(false);
-
-  const handleRealQrScan = (decodedText: string) => {
-    console.log('REAL QR DECODED:', decodedText);
-
-    setScannerOpen(false);
-    setDone(false);
-    setSafety(null);
-
-    const result = analyzeRealQr(decodedText);
-
-    setAnalysis(result);
-
-    /*
-     * Send the decoded recipient/amount to your existing backend
-     * safety-check endpoint when enough information is available.
-     */
-    if (result.isUpi && result.merchant && result.amount !== null) {
-      readQr.mutate(
-        {
-          data: {
-            merchant: result.merchant,
-            amount: result.amount,
-            source: 'qr',
-          },
-        },
-        {
-          onSuccess: setSafety,
-        },
-      );
-    }
-  };
-
-  const scanAgain = () => {
-    setAnalysis(null);
-    setSafety(null);
-    setDone(false);
-    setScannerOpen(true);
-  };
-
-  const riskClasses = {
-    LOW: {
-      box: 'border-[hsl(153_42%_42%/.3)] bg-[hsl(153_42%_42%/.08)]',
-      text: 'text-[hsl(153_42%_35%)]',
-      icon: CheckCircle2,
-    },
-    MEDIUM: {
-      box: 'border-[hsl(36_80%_54%/.35)] bg-[hsl(36_80%_54%/.1)]',
-      text: 'text-[hsl(36_70%_37%)]',
-      icon: ShieldQuestion,
-    },
-    HIGH: {
-      box: 'border-[hsl(var(--destructive)/.3)] bg-[hsl(var(--destructive)/.08)]',
-      text: 'text-[hsl(var(--destructive))]',
-      icon: Siren,
-    },
-  };
-
-  return (
-    <>
-      <PageIntro
-        eyebrow="QR guidance"
-        title="Check a QR before you pay."
-        description="Scan a real payment QR with your camera. Saathi reads the payment details and highlights structural warning signs before you continue."
-      />
-
-      <div className="grid gap-6 lg:grid-cols-[.9fr_1.1fr]">
-
-        {/* LEFT SIDE */}
-        <section className="app-card rounded-3xl p-6 md:p-8">
-          <div className="flex items-center gap-3">
-            <span className="grid h-11 w-11 place-items-center rounded-2xl bg-[hsl(var(--secondary))] text-[hsl(var(--primary))]">
-              <ShieldCheck />
-            </span>
-
-            <div>
-              <h2 className="display-font text-2xl font-bold">
-                Before you pay
-              </h2>
-
-              <p className="text-sm text-[hsl(var(--muted-foreground))]">
-                Three things to check
-              </p>
-            </div>
-          </div>
-
-          <div className="mt-8 space-y-5">
-            <GuideNumber
-              n="01"
-              title="Check the recipient"
-              detail="Make sure the displayed name and UPI ID belong to the person or shop you intended to pay."
-            />
-
-            <GuideNumber
-              n="02"
-              title="Check the amount"
-              detail="Never confirm a payment until the amount shown by Saathi matches what you expect."
-            />
-
-            <GuideNumber
-              n="03"
-              title="Look at warnings"
-              detail="A QR can be technically valid but still belong to someone you do not intend to pay."
-            />
-          </div>
-
-          <Link
-            href="/fraud-awareness"
-            className="mt-8 inline-flex items-center gap-2 text-sm font-bold text-[hsl(var(--primary))]"
-            data-testid="link-qr-fraud"
-          >
-            Learn more about suspicious requests
-            <ArrowRight size={15} />
-          </Link>
-        </section>
-
-        {/* RIGHT SIDE */}
-        <section className="app-card rounded-3xl p-6 md:p-8">
-          <SimulatedNotice />
-
-          {!analysis && !scannerOpen && (
-            <div className="mt-8 rounded-3xl border-2 border-dashed border-[hsl(var(--border))] bg-[hsl(var(--muted)/.42)] p-8 text-center">
-
-              <div className="mx-auto grid h-44 w-44 place-items-center rounded-2xl border-8 border-[hsl(var(--primary))] bg-white">
-                <ScanLine
-                  size={90}
-                  strokeWidth={1.5}
-                  className="text-[hsl(var(--primary))]"
-                />
-              </div>
-
-              <h3 className="display-font mt-7 text-2xl font-bold">
-                Ready to scan?
-              </h3>
-
-              <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[hsl(var(--muted-foreground))]">
-                Point your camera at any UPI QR code. Saathi will decode it
-                and show you the payment details.
-              </p>
-
-              <button
-                onClick={() => setScannerOpen(true)}
-                className="mt-6 inline-flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3 text-sm font-bold text-[hsl(var(--primary-foreground))]"
-                data-testid="button-scan-qr"
-              >
-                <ScanLine size={17} />
-                Scan real QR
-              </button>
-            </div>
-          )}
-
-          {scannerOpen && (
-            <RealQrScanner
-              onScan={handleRealQrScan}
-              onClose={() => setScannerOpen(false)}
-            />
-          )}
-
-          {analysis && !done && (
-            <div className="mt-8 space-y-5">
-
-              {/* Risk result */}
-              <div
-                className={`rounded-2xl border p-5 ${
-                  riskClasses[analysis.risk].box
-                }`}
-              >
-                <div
-                  className={`flex items-center gap-2 font-bold ${
-                    riskClasses[analysis.risk].text
-                  }`}
-                >
-                  {(() => {
-                    const Icon = riskClasses[analysis.risk].icon;
-                    return <Icon size={21} />;
-                  })()}
-
-                  {analysis.risk === 'LOW' &&
-                    'No obvious structural warning'}
-
-                  {analysis.risk === 'MEDIUM' &&
-                    'Review this QR carefully'}
-
-                  {analysis.risk === 'HIGH' &&
-                    'High-risk QR structure detected'}
-                </div>
-
-                <p
-                  className={`mt-2 text-sm ${
-                    riskClasses[analysis.risk].text
-                  }`}
-                >
-                  Risk score: {analysis.risk}/100
-                </p>
-              </div>
-
-              {/* Payment details */}
-              <div>
-                <p className="text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--muted-foreground))]">
-                  Payment details
-                </p>
-
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <Entity
-                    label="Recipient"
-                    value={analysis.merchant || 'Not provided'}
-                  />
-
-                  <Entity
-                    label="UPI ID"
-                    value={analysis.upiId || 'Not found'}
-                  />
-
-                  <Entity
-                    label="Amount"
-                    value={
-                      analysis.amount !== null
-                        ? `₹${analysis.amount.toLocaleString('en-IN')}`
-                        : 'Not specified'
-                    }
-                  />
-
-                  <Entity
-                    label="Currency"
-                    value={analysis.currency}
-                  />
-                </div>
-              </div>
-
-              {/* Warnings */}
-              <div className="rounded-2xl bg-[hsl(var(--secondary))] p-5">
-                <p className="font-bold">
-                  Saathi's checks
-                </p>
-
-                <div className="mt-3 space-y-3">
-                  {analysis.warnings.map((warning, index) => (
-                    <div
-                      key={`${warning}-${index}`}
-                      className="flex gap-2 text-sm leading-6"
-                    >
-                      <CircleAlert
-                        size={17}
-                        className="mt-1 shrink-0 text-[hsl(36_70%_37%)]"
-                      />
-
-                      <span>{warning}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Existing backend safety result */}
-              {readQr.isPending && (
-                <p className="text-sm font-semibold text-[hsl(var(--muted-foreground))]">
-                  Checking recipient safety…
-                </p>
-              )}
-
-              {safety && (
-                <div className="rounded-2xl border border-[hsl(var(--border))] p-5">
-                  <p className="font-bold">
-                    Safety check
-                  </p>
-
-                  <p className="mt-2 text-sm leading-6 text-[hsl(var(--muted-foreground))]">
-                    {safety.summary}
-                  </p>
-
-                  <div className="mt-4 space-y-2">
-                    {safety.checks.map((check) => (
-                      <div
-                        key={check.name}
-                        className="flex gap-2 text-sm"
-                      >
-                        {check.passed ? (
-                          <CheckCircle2
-                            size={16}
-                            className="mt-0.5 shrink-0 text-[hsl(153_42%_42%)]"
-                          />
-                        ) : (
-                          <CircleAlert
-                            size={16}
-                            className="mt-0.5 shrink-0 text-[hsl(36_70%_37%)]"
-                          />
-                        )}
-
-                        <span>
-                          <b>{check.name}:</b> {check.detail}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Action buttons */}
-              <div className="grid gap-3 sm:grid-cols-2">
-                <button
-                  onClick={scanAgain}
-                  className="rounded-xl border border-[hsl(var(--border))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary))]"
-                  data-testid="button-scan-another"
-                >
-                  Scan another QR
-                </button>
-
-                {analysis.isUpi &&
-                  analysis.merchant &&
-                  analysis.amount !== null && (
-                    <button
-                      onClick={() =>
-                        confirm.mutate(
-                          {
-                            data: {
-                              recipient: analysis.merchant,
-                              amount: analysis.amount!,
-                              source: 'qr',
-                            },
-                          },
-                          {
-                            onSuccess: () => setDone(true),
-                          },
-                        )
-                      }
-                      disabled={confirm.isPending}
-                      className="rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))] disabled:opacity-60"
-                      data-testid="button-confirm-qr"
-                    >
-                      {confirm.isPending
-                        ? 'Saving practice result…'
-                        : 'Confirm practice step'}
-                    </button>
-                  )}
-              </div>
-
-              <p className="text-xs leading-5 text-[hsl(var(--muted-foreground))]">
-                These checks identify QR/payment data that deserves attention.
-                They do not prove that a recipient is legitimate or fraudulent.
-                Always verify the recipient before paying.
-              </p>
-            </div>
-          )}
-
-          {done && (
-            <div className="mt-8 flex min-h-[320px] flex-col items-center justify-center text-center">
-              <CheckCircle2
-                className="text-[hsl(153_42%_42%)]"
-                size={42}
-              />
-
-              <h3 className="display-font mt-4 text-2xl font-bold">
-                QR checked successfully
-              </h3>
-
-              <p className="mt-2 max-w-sm text-sm leading-6 text-[hsl(var(--muted-foreground))]">
-                You checked the recipient and amount before continuing.
-              </p>
-
-              <button
-                onClick={scanAgain}
-                className="mt-6 rounded-xl bg-[hsl(var(--primary))] px-5 py-3 text-sm font-bold text-[hsl(var(--primary-foreground))]"
-              >
-                Scan another QR
-              </button>
-            </div>
-          )}
-        </section>
-      </div>
-    </>
-  );
+  const scan = () => { setScanned(true); readQr.mutate({ data: { merchant: sampleQrMerchant, amount: sampleQrAmount, source: 'sample' } }, { onSuccess: (result) => { setSafety(result); announce(`The QR code was read for ${sampleQrMerchant}, ${sampleQrAmount} rupees. ${result.safe ? 'This sample looks safe. ' : 'Saathi found something to review. '}${result.summary} Press the button that says Confirm practice step to finish.`); } }); };
+  return <><PageIntro eyebrow="QR guidance" title="A QR code is just an address." description="Learn what to look for, then practice scanning a safe sample. We’ll always show you who and how much before a confirmation." /><div className="grid gap-6 lg:grid-cols-[.9fr_1.1fr]"><section className="app-card rounded-3xl p-6 md:p-8"><div className="flex items-center gap-3"><span className="grid h-11 w-11 place-items-center rounded-2xl bg-[hsl(var(--secondary))] text-[hsl(var(--primary))]"><QrCode /></span><div><h2 className="display-font text-2xl font-bold">Before you scan</h2><p className="text-sm text-[hsl(var(--muted-foreground))]">Three clues to pause for</p></div></div><div className="mt-8 space-y-5"><GuideNumber n="01" title="Find the name" detail="A real shop or person’s name should appear near the code." /><GuideNumber n="02" title="Ask what it is for" detail="Never scan a code sent by a stranger asking for an urgent refund." /><GuideNumber n="03" title="Check the amount" detail="Saathi will repeat the recipient and amount before you decide." /></div><Link href="/fraud-awareness" className="mt-8 inline-flex items-center gap-2 text-sm font-bold text-[hsl(var(--primary))]" data-testid="link-qr-fraud">Learn more about suspicious requests <ArrowRight size={15} /></Link></section><section className="app-card rounded-3xl p-6 md:p-8"><SimulatedNotice /><div className="mt-8 rounded-3xl border-2 border-dashed border-[hsl(var(--border))] bg-[hsl(var(--muted)/.42)] p-8 text-center"><div className="mx-auto h-44 w-44 overflow-hidden rounded-2xl border-8 border-[hsl(var(--primary))] bg-white p-3 text-[hsl(var(--foreground))]"><SampleUpiQr /></div><p className="sr-only">{sampleQrPayload}</p>{!scanned && <><h3 className="display-font mt-7 text-2xl font-bold">Ready to practice?</h3><p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-[hsl(var(--muted-foreground))]">This sample belongs to {sampleQrMerchant}. Tap scan to see the safety steps.</p><button onClick={scan} disabled={readQr.isPending} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3 text-sm font-bold text-[hsl(var(--primary-foreground))] disabled:opacity-55" data-testid="button-scan-qr"><ScanLine size={17} /> {readQr.isPending ? 'Reading QR...' : 'Scan sample QR'}</button></>}{scanned && !done && <div className="mt-7 text-left"><p className="flex items-center gap-2 font-bold text-[hsl(153_42%_35%)]"><CheckCircle2 size={18} /> QR understood</p><div className="mt-4 rounded-2xl bg-[hsl(var(--secondary))] p-4"><div className="flex justify-between text-sm"><span className="text-[hsl(var(--muted-foreground))]">Paying</span><b>{sampleQrMerchant}</b></div><div className="mt-3 flex justify-between text-sm"><span className="text-[hsl(var(--muted-foreground))]">Practice amount</span><b>₹{sampleQrAmount}</b></div></div>{safety && <p className="mt-4 text-sm leading-6 text-[hsl(var(--muted-foreground))]">{safety.summary}</p>}<button onClick={() => confirm.mutate({ data: { recipient: sampleQrMerchant, amount: sampleQrAmount, source: 'qr' } }, { onSuccess: () => { setDone(true); announce(`Practice step confirmed for ${sampleQrMerchant}, ${sampleQrAmount} rupees. You paused, looked, and confirmed. That is exactly the right rhythm.`); } })} className="mt-5 w-full rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))]" data-testid="button-confirm-qr">Confirm practice step</button></div>}{done && <div className="mt-7"><CheckCircle2 className="mx-auto text-[hsl(153_42%_42%)]" size={35} /><h3 className="display-font mt-3 text-xl font-bold">Nicely checked.</h3><p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">You paused, looked, and confirmed. That is exactly the right rhythm.</p><button onClick={() => { setScanned(false); setDone(false); setSafety(null); }} className="mt-5 rounded-xl border border-[hsl(var(--border))] px-4 py-2.5 text-sm font-bold text-[hsl(var(--primary))]" data-testid="button-scan-another">Scan another sample</button></div>}</div></section></div></>;
 }
 
 function GuideNumber({ n, title, detail }: { n: string; title: string; detail: string }) {
@@ -1269,21 +606,76 @@ function SettingsPage({ focus }: { focus?: 'accessibility' }) {
   const { data } = useGetSettings();
   const save = useSaveSettings();
   const client = useQueryClient();
-  const [settings, setSettings] = useState(data ?? fallbackSettings);
+  const [settings, setSettings] = useState<ManagedSettings>(data ?? fallbackSettings);
+  const [profile, setProfile] = useState<AuthUser | null>(() => getStoredUser());
+  const [notificationPrefs, setNotificationPrefs] = useState<NotificationPrefs>({ sms: true, whatsapp: true, voice: true, email: false, emergencyPaymentNotifications: true });
+  const [voicePrefs, setVoicePrefs] = useState<VoicePrefs>({ language: 'en', speed: 1, gender: 'default', volume: 1 });
+  const [contacts, setContacts] = useState<TrustedContact[]>([]);
+  const [contactDraft, setContactDraft] = useState({ name: '', phone: '', relationship: '' });
   useEffect(() => { if (data) setSettings(data); }, [data]);
-  const update = (key: keyof typeof fallbackSettings, value: boolean | string) => {
+  useEffect(() => {
+    const hasToken = Boolean(localStorage.getItem('upisaathi_access_token') ?? localStorage.getItem('upisaathi_token'));
+    if (!hasToken) return;
+    void Promise.all([
+      apiJson<AuthUser>('/api/auth/profile').then((user) => { setProfile(user); localStorage.setItem('upisaathi_user', JSON.stringify(user)); }),
+      apiJson<NotificationPrefs>('/api/notification-preferences').then(setNotificationPrefs),
+      apiJson<VoicePrefs>('/api/voice-settings').then(setVoicePrefs),
+      apiJson<TrustedContact[]>('/api/trusted-contacts').then(setContacts),
+    ]).catch(() => undefined);
+  }, []);
+  const update = (key: keyof ManagedSettings, value: boolean | string | number) => {
     const next = { ...settings, [key]: value };
     setSettings(next);
-    save.mutate({ data: next }, { onSuccess: (saved) => client.setQueryData(getGetSettingsQueryKey(), saved) });
+    save.mutate({ data: next as Settings }, { onSuccess: (saved) => {
+      client.setQueryData(getGetSettingsQueryKey(), saved);
+      if (key === 'voiceGuidance') speakLocalized(value ? 'Voice guidance is now on. Saathi will read each payment step aloud, so you can listen and pay without reading the screen. To turn it off later, open accessibility and turn off the voice guidance switch.' : 'Voice guidance is now off.', value ? settings.language : 'en', settings.speechSpeed ?? 1);
+    } });
+  };
+  const saveProfile = async () => {
+    if (!profile) return;
+    const saved = await apiJson<AuthUser>('/api/auth/profile', { method: 'PATCH', body: JSON.stringify({ name: profile.name, phone: profile.phone, photo_url: profile.photo_url, preferred_language: profile.preferred_language ?? settings.language }) });
+    setProfile(saved);
+    localStorage.setItem('upisaathi_user', JSON.stringify(saved));
+  };
+  const saveNotificationPrefs = async (next: NotificationPrefs) => {
+    setNotificationPrefs(next);
+    await apiJson<NotificationPrefs>('/api/notification-preferences', { method: 'PUT', body: JSON.stringify(next) }).then(setNotificationPrefs).catch(() => undefined);
+  };
+  const saveVoicePrefs = async (next: VoicePrefs) => {
+    setVoicePrefs(next);
+    const saved = await apiJson<VoicePrefs>('/api/voice-settings', { method: 'PUT', body: JSON.stringify(next) });
+    setVoicePrefs(saved);
+    update('language', saved.language);
+    update('speechSpeed', saved.speed);
+    update('voiceSelection', saved.gender);
+  };
+  const addContact = async () => {
+    if (!contactDraft.name.trim() || !contactDraft.phone.trim()) return;
+    const saved = await apiJson<TrustedContact>('/api/trusted-contacts', { method: 'POST', body: JSON.stringify({ ...contactDraft, notifyOnEmergencyPayment: true }) });
+    setContacts((current) => [...current, saved]);
+    setContactDraft({ name: '', phone: '', relationship: '' });
+  };
+  const deleteContact = async (id: number) => {
+    await apiJson<void>(`/api/trusted-contacts/${id}`, { method: 'DELETE' });
+    setContacts((current) => current.filter((contact) => contact.id !== id));
   };
   const toggles = [
     { key: 'voiceGuidance' as const, icon: Volume2, title: 'Voice guidance', detail: 'Hear important details read aloud as you move through Saathi.' },
     { key: 'largeText' as const, icon: Type, title: 'Larger text', detail: 'Give words more room to breathe across the whole experience.' },
     { key: 'highContrast' as const, icon: Contrast, title: 'High contrast', detail: 'Strengthen the difference between text, controls, and their background.' },
+    { key: 'screenReader' as const, icon: Volume2, title: 'Screen reader', detail: 'Persist screen-reader friendly guidance after login.' },
     { key: 'simplifiedMode' as const, icon: TextCursorInput, title: 'Simplified mode', detail: 'Show fewer choices and one focused step at a time.' },
+    { key: 'literacyMode' as const, icon: BookOpen, title: 'Literacy mode', detail: 'Keep reading support and simple explanations switched on.' },
     { key: 'reducedMotion' as const, icon: Pause, title: 'Reduce motion', detail: 'Keep transitions quiet and remove non-essential movement.' },
   ];
-  return <><PageIntro eyebrow={focus ? 'Accessibility' : 'Your settings'} title={focus ? 'Set the pace that feels right.' : 'Make Saathi feel like yours.'} description="These preferences stay with you. Change anything at any time — there is no wrong setting." /><div className="grid gap-6 lg:grid-cols-[1fr_.62fr]"><section className="app-card rounded-3xl p-6 md:p-8"><div className="flex items-center justify-between border-b border-[hsl(var(--border))] pb-5"><div><h2 className="display-font text-2xl font-bold">Ways to make it easier</h2><p className="mt-1 text-sm text-[hsl(var(--muted-foreground))]">Tap a row to turn it on or off.</p></div><span className="grid h-11 w-11 place-items-center rounded-2xl bg-[hsl(var(--secondary))] text-[hsl(var(--primary))]"><AccessibilityIcon size={20} /></span></div><div className="divide-y divide-[hsl(var(--border))]">{toggles.map(({ key, icon: Icon, title, detail }) => <button key={key} onClick={() => update(key, !settings[key])} className="flex w-full items-center gap-4 py-5 text-left" data-testid={`button-toggle-${key}`}><span className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl ${settings[key] ? 'bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]' : 'bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))]'}`}><Icon size={19} /></span><span className="min-w-0 flex-1"><span className="block font-bold">{title}</span><span className="mt-1 block text-sm leading-5 text-[hsl(var(--muted-foreground))]">{detail}</span></span><span className={`relative h-7 w-12 shrink-0 rounded-full p-1 transition-colors ${settings[key] ? 'bg-[hsl(var(--accent))]' : 'bg-[hsl(var(--border))]'}`}><span className={`block h-5 w-5 rounded-full bg-[hsl(var(--card))] shadow-sm transition-transform ${settings[key] ? 'translate-x-5' : ''}`} /></span></button>)}</div></section><section className="space-y-5"><div className="app-card rounded-3xl p-6"><p className="text-xs font-bold uppercase tracking-[.16em] text-[hsl(var(--muted-foreground))]">Language</p><h2 className="display-font mt-2 text-2xl font-bold">How should Saathi speak?</h2><p className="mt-2 text-sm leading-6 text-[hsl(var(--muted-foreground))]">Choose the language you are most comfortable hearing.</p><Link href="/multilingual" className="mt-5 inline-flex items-center gap-2 rounded-xl bg-[hsl(var(--secondary))] px-4 py-2.5 text-sm font-bold text-[hsl(var(--primary))]" data-testid="link-change-language"><Languages size={16} /> Explore languages</Link></div><div className="app-card rounded-3xl bg-[hsl(var(--primary))] p-6 text-[hsl(var(--primary-foreground))]"><ShieldCheck className="text-[hsl(var(--accent))]" size={23} /><h2 className="display-font mt-5 text-2xl font-bold">Your choices are safe</h2><p className="mt-2 text-sm leading-6 text-[hsl(var(--primary-foreground)/.7)]">Saathi only uses these settings to make your practice experience more comfortable.</p></div></section></div>{save.isPending && <p className="mt-4 text-xs font-semibold text-[hsl(var(--muted-foreground))]" data-testid="status-saving-settings">Saving your preference…</p>}</>;
+  const notificationToggles = [
+    ['sms', 'SMS'] as const,
+    ['whatsapp', 'WhatsApp'] as const,
+    ['voice', 'Voice'] as const,
+    ['email', 'Email'] as const,
+    ['emergencyPaymentNotifications', 'Emergency alerts'] as const,
+  ];
+  return <><PageIntro eyebrow={focus ? 'Accessibility' : 'Your settings'} title={focus ? 'Set the pace that feels right.' : 'Make Saathi feel like yours.'} description="These preferences stay with you. Change anything at any time — there is no wrong setting." /><div className="grid gap-6 lg:grid-cols-[1fr_.72fr]"><section className="space-y-6"><div className="app-card rounded-3xl p-6 md:p-8"><div className="flex items-center justify-between border-b border-[hsl(var(--border))] pb-5"><div><h2 className="display-font text-2xl font-bold">Ways to make it easier</h2><p className="mt-1 text-sm text-[hsl(var(--muted-foreground))]">Tap a row to turn it on or off.</p></div><span className="grid h-11 w-11 place-items-center rounded-2xl bg-[hsl(var(--secondary))] text-[hsl(var(--primary))]"><AccessibilityIcon size={20} /></span></div><div className="divide-y divide-[hsl(var(--border))]">{toggles.map(({ key, icon: Icon, title, detail }) => <button key={key} onClick={() => update(key, !settings[key])} className="flex w-full items-center gap-4 py-5 text-left" data-testid={`button-toggle-${key}`}><span className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl ${settings[key] ? 'bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]' : 'bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))]'}`}><Icon size={19} /></span><span className="min-w-0 flex-1"><span className="block font-bold">{title}</span><span className="mt-1 block text-sm leading-5 text-[hsl(var(--muted-foreground))]">{detail}</span></span><span className={`relative h-7 w-12 shrink-0 rounded-full p-1 transition-colors ${settings[key] ? 'bg-[hsl(var(--accent))]' : 'bg-[hsl(var(--border))]'}`}><span className={`block h-5 w-5 rounded-full bg-[hsl(var(--card))] shadow-sm transition-transform ${settings[key] ? 'translate-x-5' : ''}`} /></span></button>)}</div></div><div className="app-card rounded-3xl p-6"><h2 className="display-font text-2xl font-bold">Profile</h2><div className="mt-5 grid gap-3 sm:grid-cols-2"><input value={profile?.name ?? ''} onChange={(e) => setProfile((current) => ({ ...(current ?? { id: 0, email: '', name: '' }), name: e.target.value }))} placeholder="Name" className="rounded-xl border border-[hsl(var(--input))] px-4 py-3 text-sm" /><input value={profile?.phone ?? ''} onChange={(e) => setProfile((current) => ({ ...(current ?? { id: 0, email: '', name: '' }), phone: e.target.value }))} placeholder="Phone" className="rounded-xl border border-[hsl(var(--input))] px-4 py-3 text-sm" /><input value={profile?.photo_url ?? ''} onChange={(e) => setProfile((current) => ({ ...(current ?? { id: 0, email: '', name: '' }), photo_url: e.target.value }))} placeholder="Photo URL" className="rounded-xl border border-[hsl(var(--input))] px-4 py-3 text-sm sm:col-span-2" /></div><button onClick={saveProfile} className="mt-4 rounded-xl bg-[hsl(var(--primary))] px-4 py-2.5 text-sm font-bold text-[hsl(var(--primary-foreground))]">Save profile</button></div></section><section className="space-y-5"><div className="app-card rounded-3xl p-6"><p className="text-xs font-bold uppercase tracking-[.16em] text-[hsl(var(--muted-foreground))]">Voice settings</p><h2 className="display-font mt-2 text-2xl font-bold">How should Saathi speak?</h2><div className="mt-5 space-y-3"><select value={voicePrefs.language} onChange={(e) => saveVoicePrefs({ ...voicePrefs, language: e.target.value })} className="w-full rounded-xl border border-[hsl(var(--input))] px-4 py-3 text-sm"><option value="en">English</option><option value="hi">Hindi</option><option value="mr">Marathi</option><option value="ta">Tamil</option></select><select value={voicePrefs.gender} onChange={(e) => saveVoicePrefs({ ...voicePrefs, gender: e.target.value })} className="w-full rounded-xl border border-[hsl(var(--input))] px-4 py-3 text-sm"><option value="default">Default voice</option><option value="female">Female voice</option><option value="male">Male voice</option></select><label className="block text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--muted-foreground))]">Speed {voicePrefs.speed.toFixed(1)}</label><input type="range" min="0.5" max="2" step="0.1" value={voicePrefs.speed} onChange={(e) => saveVoicePrefs({ ...voicePrefs, speed: Number(e.target.value) })} className="w-full" /><label className="block text-xs font-bold uppercase tracking-[.14em] text-[hsl(var(--muted-foreground))]">Volume {Math.round(voicePrefs.volume * 100)}%</label><input type="range" min="0" max="1" step="0.05" value={voicePrefs.volume} onChange={(e) => saveVoicePrefs({ ...voicePrefs, volume: Number(e.target.value) })} className="w-full" /></div></div><div className="app-card rounded-3xl p-6"><h2 className="display-font text-2xl font-bold">Notifications</h2><div className="mt-4 flex flex-wrap gap-2">{notificationToggles.map(([key, label]) => <button key={key} onClick={() => saveNotificationPrefs({ ...notificationPrefs, [key]: !notificationPrefs[key] })} className={`rounded-full border px-3 py-2 text-xs font-bold ${notificationPrefs[key] ? 'border-[hsl(var(--primary))] bg-[hsl(var(--secondary))] text-[hsl(var(--primary))]' : 'border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))]'}`}>{label}</button>)}</div></div><div className="app-card rounded-3xl p-6"><h2 className="display-font text-2xl font-bold">Trusted contacts</h2><div className="mt-4 space-y-3">{contacts.map((contact) => <div key={contact.id} className="flex items-center justify-between rounded-2xl border border-[hsl(var(--border))] p-3 text-sm"><span><b>{contact.name}</b><span className="ml-2 text-[hsl(var(--muted-foreground))]">{contact.phone}</span></span><button onClick={() => deleteContact(contact.id)} className="font-bold text-[hsl(var(--destructive))]">Delete</button></div>)}</div><div className="mt-4 grid gap-2 sm:grid-cols-3"><input value={contactDraft.name} onChange={(e) => setContactDraft({ ...contactDraft, name: e.target.value })} placeholder="Name" className="rounded-xl border border-[hsl(var(--input))] px-3 py-2 text-sm" /><input value={contactDraft.phone} onChange={(e) => setContactDraft({ ...contactDraft, phone: e.target.value })} placeholder="Phone" className="rounded-xl border border-[hsl(var(--input))] px-3 py-2 text-sm" /><input value={contactDraft.relationship} onChange={(e) => setContactDraft({ ...contactDraft, relationship: e.target.value })} placeholder="Relation" className="rounded-xl border border-[hsl(var(--input))] px-3 py-2 text-sm" /></div><button onClick={addContact} className="mt-3 rounded-xl bg-[hsl(var(--primary))] px-4 py-2.5 text-sm font-bold text-[hsl(var(--primary-foreground))]">Add contact</button></div></section></div>{save.isPending && <p className="mt-4 text-xs font-semibold text-[hsl(var(--muted-foreground))]" data-testid="status-saving-settings">Saving your preference…</p>}</>;
 }
 
 function Multilingual() {
@@ -1413,8 +805,17 @@ function AiAssistant() {
 
 function History() {
   const { data, isLoading, isError, refetch } = useGetHistory();
+  const [search, setSearch] = useState('');
+  const [source, setSource] = useState('all');
   const payments = data ?? fallbackPayments;
-  return <><PageIntro eyebrow="Payment history" title="A clear record of your practice." description="Every item here is simulated. Use the list to remember what you checked and how you chose to pay." action={<Link href="/voice-payment" className="inline-flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-4 py-3 text-sm font-bold text-[hsl(var(--primary-foreground))]" data-testid="link-history-new-payment"><Mic size={16} /> New practice</Link>} /><div className="mb-6"><SimulatedNotice /></div>{isError ? <ErrorState retry={() => refetch()} /> : <div className="app-card overflow-hidden rounded-3xl"><div className="hidden grid-cols-[1.4fr_.7fr_.8fr_.7fr] gap-4 border-b border-[hsl(var(--border))] bg-[hsl(var(--muted)/.5)] px-6 py-4 text-[10px] font-bold uppercase tracking-[.16em] text-[hsl(var(--muted-foreground))] md:grid"><span>Recipient</span><span>When</span><span>Source</span><span className="text-right">Amount</span></div><div className="divide-y divide-[hsl(var(--border))]">{isLoading ? [1, 2, 3].map((i) => <Skeleton className="mx-6 my-5 h-12" key={i} />) : payments.map((payment) => <div key={payment.id} className="grid gap-3 px-5 py-5 md:grid-cols-[1.4fr_.7fr_.8fr_.7fr] md:items-center md:gap-4 md:px-6" data-testid={`row-history-${payment.id}`}><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-[hsl(var(--secondary))] text-[hsl(var(--primary))]"><WalletCards size={17} /></span><div><p className="text-sm font-bold">{payment.recipient}</p><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{payment.demoLabel}</p></div></div><span className="text-xs text-[hsl(var(--muted-foreground))]">{payment.date}</span><span className="text-xs font-semibold text-[hsl(var(--muted-foreground))]">{payment.source === 'voice' ? 'Voice guidance' : payment.source === 'qr' ? 'QR guidance' : 'Manual entry'}</span><span className="text-sm font-bold md:text-right">₹{payment.amount.toLocaleString('en-IN')}</span></div>)}</div></div>}</>;
+  const filtered = payments.filter((payment) => {
+    const matchesSearch = payment.recipient.toLowerCase().includes(search.toLowerCase()) || payment.transactionId.toLowerCase().includes(search.toLowerCase());
+    const matchesSource = source === 'all' || payment.source === source;
+    return matchesSearch && matchesSource;
+  });
+  const exportHistory = () => { window.location.href = '/api/history/export'; };
+  const exportReceipt = (payment: Payment) => { window.location.href = (payment as Payment & { receiptUrl?: string }).receiptUrl ?? `/api/history/${payment.transactionId}/receipt`; };
+  return <><PageIntro eyebrow="Payment history" title="A clear record of your practice." description="Every item here is simulated. Use the list to remember what you checked and how you chose to pay." action={<Link href="/voice-payment" className="inline-flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-4 py-3 text-sm font-bold text-[hsl(var(--primary-foreground))]" data-testid="link-history-new-payment"><Mic size={16} /> New practice</Link>} /><div className="mb-6"><SimulatedNotice /></div><div className="mb-4 grid gap-3 md:grid-cols-[1fr_180px_auto]"><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search recipient or receipt" className="rounded-xl border border-[hsl(var(--input))] bg-[hsl(var(--card))] px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]" /><select value={source} onChange={(e) => setSource(e.target.value)} className="rounded-xl border border-[hsl(var(--input))] bg-[hsl(var(--card))] px-4 py-3 text-sm"><option value="all">All sources</option><option value="voice">Voice</option><option value="qr">QR</option><option value="manual">Manual</option></select><button onClick={exportHistory} className="rounded-xl bg-[hsl(var(--secondary))] px-4 py-3 text-sm font-bold text-[hsl(var(--primary))]">Export CSV</button></div>{isError ? <ErrorState retry={() => refetch()} /> : <div className="app-card overflow-hidden rounded-3xl"><div className="hidden grid-cols-[1.25fr_.66fr_.7fr_.6fr_.48fr] gap-4 border-b border-[hsl(var(--border))] bg-[hsl(var(--muted)/.5)] px-6 py-4 text-[10px] font-bold uppercase tracking-[.16em] text-[hsl(var(--muted-foreground))] md:grid"><span>Recipient</span><span>When</span><span>Source</span><span>Status</span><span className="text-right">Amount</span></div><div className="divide-y divide-[hsl(var(--border))]">{isLoading ? [1, 2, 3].map((i) => <Skeleton className="mx-6 my-5 h-12" key={i} />) : filtered.map((payment) => <div key={payment.id} className="grid gap-3 px-5 py-5 md:grid-cols-[1.25fr_.66fr_.7fr_.6fr_.48fr] md:items-center md:gap-4 md:px-6" data-testid={`row-history-${payment.id}`}><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-[hsl(var(--secondary))] text-[hsl(var(--primary))]"><WalletCards size={17} /></span><div><p className="text-sm font-bold">{payment.recipient}</p><button onClick={() => exportReceipt(payment)} className="mt-1 text-xs font-bold text-[hsl(var(--primary))]">{payment.transactionId}</button></div></div><span className="text-xs text-[hsl(var(--muted-foreground))]">{payment.date}</span><span className="text-xs font-semibold text-[hsl(var(--muted-foreground))]">{payment.source === 'voice' ? 'Voice guidance' : payment.source === 'qr' ? 'QR guidance' : 'Manual entry'}</span><span className="text-xs font-semibold text-[hsl(var(--muted-foreground))]">{(payment as Payment & { notificationStatus?: string }).notificationStatus ?? payment.safetyStatus}</span><span className="text-sm font-bold md:text-right">₹{payment.amount.toLocaleString('en-IN')}</span></div>)}</div></div>}</>;
 }
 
 function NotificationsPage() {
@@ -1536,7 +937,7 @@ function FraudQuizPage() {
 function AuthPage({ type }: { type: 'login' | 'signup' | 'forgot' }) {
   const [, setLocation] = useLocation();
   const copy = type === 'login' ? { eyebrow: 'Welcome back', title: 'Your calm place to practice payments.', button: 'Sign in', footer: 'New to Saathi?', link: 'Create an account', href: '/signup' } : type === 'signup' ? { eyebrow: 'Start gently', title: 'Build payment confidence at your pace.', button: 'Create account', footer: 'Already practicing?', link: 'Sign in', href: '/login' } : { eyebrow: 'No rush', title: 'We will help you get back in.', button: 'Send reset link', footer: 'Remembered it?', link: 'Sign in', href: '/login' };
-  return <div className="noise grid min-h-[100dvh] bg-[hsl(204_45%_97%)] lg:grid-cols-[.85fr_1.15fr]"><div className="flex flex-col justify-between bg-[hsl(var(--primary))] p-7 text-[hsl(var(--primary-foreground))] lg:p-12"><BrandMark /><div className="max-w-md py-10"><p className="text-xs font-bold uppercase tracking-[.2em] text-[hsl(var(--accent))]">UPI Saathi</p><h1 className="display-font mt-5 text-5xl font-extrabold leading-[.98] tracking-[-.05em]">Payment confidence is a practice.</h1><p className="mt-6 text-base leading-7 text-[hsl(var(--primary-foreground)/.68)]">A reassuring guide for the everyday moments that matter.</p></div><p className="text-xs text-[hsl(var(--primary-foreground)/.48)]">Simulated learning environment · no real payments</p></div><div className="flex items-center justify-center p-6 md:p-12"><div className="w-full max-w-md"><p className="text-xs font-bold uppercase tracking-[.2em] text-[hsl(var(--primary))]">{copy.eyebrow}</p><h2 className="display-font mt-4 text-4xl font-extrabold leading-tight tracking-[-.045em]">{copy.title}</h2><p className="mt-3 text-sm leading-6 text-[hsl(var(--muted-foreground))]">For this demo, any details will take you into the guided experience.</p><form onSubmit={(event) => { event.preventDefault(); setLocation('/dashboard'); }} className="mt-9 space-y-4"><label className="block text-sm font-bold" htmlFor="auth-name">{type === 'signup' ? 'Your name' : 'Email or phone'}</label><input id="auth-name" className="w-full rounded-xl border border-[hsl(var(--input))] bg-[hsl(var(--card))] px-4 py-3.5 outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]" placeholder={type === 'signup' ? 'Anita Sharma' : 'you@example.com'} data-testid="input-auth-primary" /><label className="block text-sm font-bold" htmlFor="auth-password">{type === 'forgot' ? ' ' : 'Password'}</label>{type !== 'forgot' && <input id="auth-password" type="password" className="w-full rounded-xl border border-[hsl(var(--input))] bg-[hsl(var(--card))] px-4 py-3.5 outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]" placeholder="At least 6 characters" data-testid="input-auth-password" />}<button className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))]" data-testid="button-auth-submit">{copy.button} <ArrowRight size={16} /></button></form><p className="mt-7 text-center text-sm text-[hsl(var(--muted-foreground))]">{copy.footer} <Link href={copy.href} className="font-bold text-[hsl(var(--primary))]" data-testid="link-auth-switch">{copy.link}</Link></p>{type === 'login' && <Link href="/forgot-password" className="mt-3 block text-center text-xs font-bold text-[hsl(var(--muted-foreground))]" data-testid="link-forgot-password">Forgot password?</Link>}</div></div></div>;
+  return <div className="noise grid min-h-[100dvh] bg-[hsl(204_45%_97%)] lg:grid-cols-[.85fr_1.15fr]"><div className="flex flex-col justify-between bg-[hsl(var(--primary))] p-7 text-[hsl(var(--primary-foreground))] lg:p-12"><BrandMark /><div className="max-w-md py-10"><p className="text-xs font-bold uppercase tracking-[.2em] text-[hsl(var(--accent))]">UPI Saathi</p><h1 className="display-font mt-5 text-5xl font-extrabold leading-[.98] tracking-[-.05em]">Payment confidence is a practice.</h1><p className="mt-6 text-base leading-7 text-[hsl(var(--primary-foreground)/.68)]">A reassuring guide for the everyday moments that matter.</p></div><p className="text-xs text-[hsl(var(--primary-foreground)/.48)]">Simulated learning environment · no real payments</p></div><div className="flex items-center justify-center p-6 md:p-12"><div className="w-full max-w-md"><p className="text-xs font-bold uppercase tracking-[.2em] text-[hsl(var(--primary))]">{copy.eyebrow}</p><h2 className="display-font mt-4 text-4xl font-extrabold leading-tight tracking-[-.045em]">{copy.title}</h2><p className="mt-3 text-sm leading-6 text-[hsl(var(--muted-foreground))]">For this demo, any details will take you into the guided experience.</p><form onSubmit={(event) => { event.preventDefault(); void handleAuthSubmit(type, setLocation, event.currentTarget as HTMLFormElement); }} className="mt-9 space-y-4"><label className="block text-sm font-bold" htmlFor="auth-name">{type === 'signup' ? 'Your name' : 'Email or phone'}</label><input id="auth-name" className="w-full rounded-xl border border-[hsl(var(--input))] bg-[hsl(var(--card))] px-4 py-3.5 outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]" placeholder={type === 'signup' ? 'Anita Sharma' : 'you@example.com'} data-testid="input-auth-primary" /><label className="block text-sm font-bold" htmlFor="auth-password">{type === 'forgot' ? ' ' : 'Password'}</label>{type !== 'forgot' && <input id="auth-password" type="password" className="w-full rounded-xl border border-[hsl(var(--input))] bg-[hsl(var(--card))] px-4 py-3.5 outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]" placeholder="At least 6 characters" data-testid="input-auth-password" />}<button className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-bold text-[hsl(var(--primary-foreground))]" data-testid="button-auth-submit">{copy.button} <ArrowRight size={16} /></button></form><p className="mt-7 text-center text-sm text-[hsl(var(--muted-foreground))]">{copy.footer} <Link href={copy.href} className="font-bold text-[hsl(var(--primary))]" data-testid="link-auth-switch">{copy.link}</Link></p>{type === 'login' && <Link href="/forgot-password" className="mt-3 block text-center text-xs font-bold text-[hsl(var(--muted-foreground))]" data-testid="link-forgot-password">Forgot password?</Link>}</div></div></div>;
 }
 
 function AccessibilityRoute() {
